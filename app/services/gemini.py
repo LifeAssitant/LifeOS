@@ -20,16 +20,18 @@ from app.schemas import EventCreate, EventUpdate, TaskCreate, TaskUpdate
 from app.services.lifecycle import EventService, TaskService, UserService
 
 
-SYSTEM_PROMPT = """You are LifeOS, a calm and cute life manager assistant.
-Help the user manage tasks and events only. Be warm, brief, and clear.
-When the user asks to create, update, complete, or delete tasks/events, respond with:
-1) A short friendly message
-2) A JSON actions block
+SYSTEM_PROMPT = """You are LifeOS — a calm, human life manager (not a dumb calendar bot).
+You protect the user's time: notice conflicts, protect fixed commitments, and rearrange flexible work with care.
+Be warm, brief, and conversational. Ask a clear question when something is ambiguous.
+
+When creating, updating, completing, or deleting tasks/events, respond with:
+1) A short natural message (manager tone)
+2) A JSON actions block ONLY when you are actually changing the schedule
 
 Use exactly this format at the end of your reply when taking actions:
 
 ```json
-{"actions":[{"type":"create_task","summary":"Added Study","payload":{"title":"Study","due_at":"2026-09-18T18:00:00+05:30"}}]}
+{"actions":[{"type":"create_task","summary":"Added Study","payload":{"title":"Study","due_at":"2026-09-19T16:00:00+05:30"}}]}
 ```
 
 Allowed action types:
@@ -41,16 +43,43 @@ Allowed action types:
 - update_event: payload {event_id, title?, start_at?, end_at?, location?, notes?}
 - delete_event: payload {event_id}
 
-Rules:
-- Always use the user's current local date/time and timezone from the context block.
-- "today", "tonight", "tomorrow" must resolve against that local clock — never invent a past year.
-- ISO-8601 datetimes MUST include the user's timezone offset (e.g. +05:30 for Asia/Kolkata).
-  If the user says 11:15 PM, write 23:15 with their offset — do NOT tag local clock times as +00:00 / Z.
-- For update_task / update_event, only include fields the user wants changed. Never send null for title.
-- Match existing items by the IDs in the schedule context when updating or completing.
-- If no action is needed, omit the JSON block.
-- Never invent unrelated productivity features.
-- Prefer one clear action over many.
+=== Time & IDs ===
+- Always use the user's local date/time and timezone from the [User clock] block.
+- "today", "tonight", "tomorrow" resolve against that clock — never invent a past year.
+- ISO-8601 datetimes MUST include the user's timezone offset (e.g. +05:30). Never stamp local times as Z/+00:00.
+- Match existing items by the IDs in the schedule context. For update_task / update_event, only send fields that change. Never null out title.
+- Google-sourced items are usually FIXED (meetings already on their calendar). Prefer not to move/delete them unless the user explicitly asks.
+
+=== Act as a manager (critical) ===
+Treat timed events as more FIXED than open tasks. Treat phrases like "fixed", "can't move", "must", meetings, calls, appointments as FIXED.
+Treat personal work (coding, study, errands) as FLEXIBLE unless the user says otherwise.
+
+Conflict detection:
+- Before creating anything, scan the schedule context for the same day/time.
+- If the new item would collide with something already scheduled, DO NOT silently stack both at the same time.
+- Instead: briefly name the collision, suggest 1–2 concrete options (move flexible item earlier/later, shorten, or deprioritize), and ASK what they prefer.
+- Only apply create/update actions after they choose — OR when they already gave clear instructions (e.g. "client meeting is fixed, rearrange coding").
+
+When they ask to plan / rearrange / prioritize / "act as my manager":
+- Identify what is FIXED vs FLEXIBLE from their words + the schedule context.
+- Propose a sensible order (fixed stays; flexible fills free gaps; higher-urgency before lower).
+- Then APPLY it with update_task / update_event (and create if needed) — multiple actions in one JSON block are encouraged for a real rearrange.
+- Explain the plan in one short paragraph: what stayed, what moved, and why.
+- If priority is unclear, ask one sharp question first (no actions yet): e.g. "Client meeting stays at 2 — should coding go before (morning) or after (late afternoon)?"
+
+Planning requests ("plan my day/week", "what should I do"):
+- Read open tasks + events, group by day, call out overload or empty gaps.
+- Suggest a concrete plan; ask confirmation if big moves are needed; apply updates once they agree or when they say "go ahead" / "rearrange".
+
+Conversation style:
+- Sound human: curious, decisive, kind — not corporate and not emoji-spammy (at most one light emoji).
+- Prefer questions over guessing when stakes are high (collisions, dropping something, moving a meeting).
+- Prefer action over endless chat when instructions are already clear.
+
+Other:
+- If no schedule change is needed, omit the JSON block.
+- Never invent unrelated productivity features (habits, streaks, OKRs, etc.).
+- Do not create duplicate titles at the same time just to "acknowledge" a request.
 """
 
 
@@ -80,6 +109,44 @@ def _system_prompt_with_clock(tz_name: Optional[str]) -> str:
         f"- utc_offset: {offset_fmt}\n"
         f"- Use this clock for every relative date/time.\n"
     )
+
+
+def _overlap_hints(tasks: list[Any], events: list[Any], *, tz: ZoneInfo) -> list[str]:
+    """Surface same-day multi-item days so the model cannot miss collisions."""
+    buckets: dict[str, list[str]] = {}
+
+    def day_key(dt: datetime) -> str:
+        return dt.astimezone(tz).strftime("%Y-%m-%d")
+
+    def slot_label(dt: datetime) -> str:
+        return dt.astimezone(tz).strftime("%H:%M")
+
+    for e in events:
+        if not e.start_at:
+            continue
+        key = day_key(e.start_at)
+        end = e.end_at.astimezone(tz).strftime("%H:%M") if e.end_at else "open"
+        src = e.source.value if hasattr(e.source, "value") else e.source
+        buckets.setdefault(key, []).append(
+            f"event '{e.title}' @{slot_label(e.start_at)}–{end} [{e.id}] source={src}"
+        )
+    for t in tasks:
+        if not t.due_at:
+            continue
+        key = day_key(t.due_at)
+        buckets.setdefault(key, []).append(
+            f"task '{t.title}' due @{slot_label(t.due_at)} [{t.id}]"
+        )
+
+    hints: list[str] = []
+    for day, items in sorted(buckets.items()):
+        if len(items) < 2:
+            continue
+        hints.append(
+            f"{day}: {len(items)} timed items — check for collisions:\n  - "
+            + "\n  - ".join(items)
+        )
+    return hints[:8]
 
 
 def _extract_actions_block(text: str) -> tuple[str, list[dict[str, Any]]]:
@@ -169,23 +236,40 @@ class GeminiChatService:
         await self.db.commit()
         await self.db.refresh(user)
 
-    async def _context_snapshot(self, user: User) -> str:
+    async def _context_snapshot(
+        self, user: User, *, timezone_name: Optional[str] = None
+    ) -> str:
         open_tasks = await self.tasks.list_tasks(user, status=TaskStatus.open)
-        # Wide window so wrongly dated past items stay matchable for updates
         recent_events = await self.events.list_events(
             user, from_dt=_utcnow() - timedelta(days=60)
         )
+        tz = _resolve_tz(timezone_name)
         task_lines = [
-            f"- [{t.id}] {t.title} due={t.due_at.isoformat() if t.due_at else 'none'}"
-            for t in open_tasks[:20]
+            f"- [{t.id}] {t.title} due={t.due_at.isoformat() if t.due_at else 'none'} (flexible unless user says fixed)"
+            for t in open_tasks[:25]
         ]
         event_lines = [
-            f"- [{e.id}] {e.title} start={e.start_at.isoformat()}"
-            for e in recent_events[:30]
+            (
+                f"- [{e.id}] {e.title} start={e.start_at.isoformat()}"
+                f" end={e.end_at.isoformat() if e.end_at else 'none'}"
+                f" source={e.source.value if hasattr(e.source, 'value') else e.source}"
+                f"{' (treat as FIXED)' if str(getattr(e.source, 'value', e.source)) == 'google' else ''}"
+            )
+            for e in recent_events[:40]
         ]
+        hints = _overlap_hints(open_tasks, recent_events, tz=tz)
+        hint_block = (
+            "\n\nPossible busy days / collisions to resolve as a manager:\n"
+            + "\n".join(f"- {h}" for h in hints)
+            if hints
+            else "\n\nNo multi-item busy days flagged — still check before stacking same times."
+        )
         return (
             f"Open tasks:\n{chr(10).join(task_lines) or '- none'}\n\n"
             f"Recent/upcoming events:\n{chr(10).join(event_lines) or '- none'}"
+            f"{hint_block}\n\n"
+            "Manager note: if the user asks to rearrange/prioritize, use update_* actions "
+            "on flexible items; keep FIXED items unless they explicitly move them."
         )
 
     def _task_update_payload(
@@ -359,9 +443,13 @@ class GeminiChatService:
         self.db.add(user_msg)
         await self.db.commit()
 
-        snapshot = await self._context_snapshot(user)
+        snapshot = await self._context_snapshot(user, timezone_name=timezone_name)
         history = await self.history(user, limit=12)
-        prompt = f"{content.strip()}\n\n[Current schedule context]\n{snapshot}"
+        prompt = (
+            f"{content.strip()}\n\n"
+            f"[Current schedule context]\n{snapshot}\n\n"
+            "Remember: collide → ask; clear rearrange orders → update flexible items now."
+        )
         contents = _build_contents(history, prompt)
         system_instruction = _system_prompt_with_clock(timezone_name)
 
@@ -404,9 +492,13 @@ class GeminiChatService:
         self.db.add(user_msg)
         await self.db.commit()
 
-        snapshot = await self._context_snapshot(user)
+        snapshot = await self._context_snapshot(user, timezone_name=timezone_name)
         history = await self.history(user, limit=12)
-        prompt = f"{content.strip()}\n\n[Current schedule context]\n{snapshot}"
+        prompt = (
+            f"{content.strip()}\n\n"
+            f"[Current schedule context]\n{snapshot}\n\n"
+            "Remember: collide → ask; clear rearrange orders → update flexible items now."
+        )
         contents = _build_contents(history, prompt)
         system_instruction = _system_prompt_with_clock(timezone_name)
 

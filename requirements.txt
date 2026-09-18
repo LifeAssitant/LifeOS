@@ -15,3 +15,4 @@ redis==5.2.1
 google-genai==1.75.0
 stripe==11.4.1
 python-multipart==0.0.20
+tzdata==2025.2

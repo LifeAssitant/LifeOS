@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Optional
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException
 from google import genai
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core.rate_limit import enforce_hosted_chat_limit
-from app.models import AIMode, ChatMessage, ChatRole, Task, TaskSource, TaskStatus, User
+from app.models import AIMode, ChatMessage, ChatRole, TaskSource, TaskStatus, User
 from app.schemas import EventCreate, EventUpdate, TaskCreate, TaskUpdate
 from app.services.lifecycle import EventService, TaskService, UserService
 
@@ -28,7 +29,7 @@ When the user asks to create, update, complete, or delete tasks/events, respond 
 Use exactly this format at the end of your reply when taking actions:
 
 ```json
-{"actions":[{"type":"create_task","summary":"Added Study","payload":{"title":"Study","due_at":"2026-09-18T18:00:00+00:00"}}]}
+{"actions":[{"type":"create_task","summary":"Added Study","payload":{"title":"Study","due_at":"2026-09-18T18:00:00+05:30"}}]}
 ```
 
 Allowed action types:
@@ -41,7 +42,12 @@ Allowed action types:
 - delete_event: payload {event_id}
 
 Rules:
-- ISO-8601 datetimes with timezone when possible.
+- Always use the user's current local date/time and timezone from the context block.
+- "today", "tonight", "tomorrow" must resolve against that local clock — never invent a past year.
+- ISO-8601 datetimes MUST include the user's timezone offset (e.g. +05:30 for Asia/Kolkata).
+  If the user says 11:15 PM, write 23:15 with their offset — do NOT tag local clock times as +00:00 / Z.
+- For update_task / update_event, only include fields the user wants changed. Never send null for title.
+- Match existing items by the IDs in the schedule context when updating or completing.
 - If no action is needed, omit the JSON block.
 - Never invent unrelated productivity features.
 - Prefer one clear action over many.
@@ -50,6 +56,30 @@ Rules:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _resolve_tz(name: Optional[str]) -> ZoneInfo:
+    if name:
+        try:
+            return ZoneInfo(name)
+        except ZoneInfoNotFoundError:
+            pass
+    return ZoneInfo("UTC")
+
+
+def _system_prompt_with_clock(tz_name: Optional[str]) -> str:
+    tz = _resolve_tz(tz_name)
+    now_local = datetime.now(tz)
+    offset = now_local.strftime("%z")
+    offset_fmt = f"{offset[:3]}:{offset[3:]}" if offset else "+00:00"
+    return (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"[User clock]\n"
+        f"- timezone: {getattr(tz, 'key', tz_name) or 'UTC'}\n"
+        f"- local_now: {now_local.isoformat()}\n"
+        f"- utc_offset: {offset_fmt}\n"
+        f"- Use this clock for every relative date/time.\n"
+    )
 
 
 def _extract_actions_block(text: str) -> tuple[str, list[dict[str, Any]]]:
@@ -141,25 +171,63 @@ class GeminiChatService:
 
     async def _context_snapshot(self, user: User) -> str:
         open_tasks = await self.tasks.list_tasks(user, status=TaskStatus.open)
-        upcoming = await self.events.list_events(user, from_dt=_utcnow())
+        # Wide window so wrongly dated past items stay matchable for updates
+        recent_events = await self.events.list_events(
+            user, from_dt=_utcnow() - timedelta(days=60)
+        )
         task_lines = [
             f"- [{t.id}] {t.title} due={t.due_at.isoformat() if t.due_at else 'none'}"
             for t in open_tasks[:20]
         ]
         event_lines = [
             f"- [{e.id}] {e.title} start={e.start_at.isoformat()}"
-            for e in upcoming[:20]
+            for e in recent_events[:30]
         ]
         return (
             f"Open tasks:\n{chr(10).join(task_lines) or '- none'}\n\n"
-            f"Upcoming events:\n{chr(10).join(event_lines) or '- none'}"
+            f"Recent/upcoming events:\n{chr(10).join(event_lines) or '- none'}"
         )
 
+    def _task_update_payload(
+        self, payload: dict[str, Any], default_tz: ZoneInfo
+    ) -> TaskUpdate:
+        data: dict[str, Any] = {}
+        if "title" in payload and payload["title"] is not None:
+            data["title"] = payload["title"]
+        if "notes" in payload:
+            data["notes"] = payload["notes"]
+        if "due_at" in payload:
+            data["due_at"] = _parse_dt(payload.get("due_at"), default_tz=default_tz)
+        if "status" in payload and payload["status"]:
+            data["status"] = TaskStatus(payload["status"])
+        return TaskUpdate(**data)
+
+    def _event_update_payload(
+        self, payload: dict[str, Any], default_tz: ZoneInfo
+    ) -> EventUpdate:
+        data: dict[str, Any] = {}
+        if "title" in payload and payload["title"] is not None:
+            data["title"] = payload["title"]
+        if "notes" in payload:
+            data["notes"] = payload["notes"]
+        if "location" in payload:
+            data["location"] = payload["location"]
+        if "start_at" in payload:
+            data["start_at"] = _parse_dt(payload.get("start_at"), default_tz=default_tz)
+        if "end_at" in payload:
+            data["end_at"] = _parse_dt(payload.get("end_at"), default_tz=default_tz)
+        return EventUpdate(**data)
+
     async def apply_actions(
-        self, user: User, actions: list[dict[str, Any]]
+        self,
+        user: User,
+        actions: list[dict[str, Any]],
+        *,
+        timezone_name: Optional[str] = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         applied: list[dict[str, Any]] = []
         linked: list[str] = []
+        default_tz = _resolve_tz(timezone_name)
 
         for raw in actions:
             action_type = raw.get("type")
@@ -174,7 +242,7 @@ class GeminiChatService:
                         TaskCreate(
                             title=payload["title"],
                             notes=payload.get("notes"),
-                            due_at=_parse_dt(payload.get("due_at")),
+                            due_at=_parse_dt(payload.get("due_at"), default_tz=default_tz),
                             source=TaskSource.chat,
                         ),
                     )
@@ -185,14 +253,7 @@ class GeminiChatService:
                     task = await self.tasks.update(
                         user,
                         task_id,
-                        TaskUpdate(
-                            title=payload.get("title"),
-                            notes=payload.get("notes"),
-                            due_at=_parse_dt(payload.get("due_at")),
-                            status=TaskStatus(payload["status"])
-                            if payload.get("status")
-                            else None,
-                        ),
+                        self._task_update_payload(payload, default_tz),
                     )
                     entity_id = str(task.id)
                     summary = summary or f"Updated “{task.title}”"
@@ -212,8 +273,9 @@ class GeminiChatService:
                             title=payload["title"],
                             notes=payload.get("notes"),
                             location=payload.get("location"),
-                            start_at=_parse_dt(payload["start_at"]) or _utcnow(),
-                            end_at=_parse_dt(payload.get("end_at")),
+                            start_at=_parse_dt(payload["start_at"], default_tz=default_tz)
+                            or _utcnow(),
+                            end_at=_parse_dt(payload.get("end_at"), default_tz=default_tz),
                             source=TaskSource.chat,
                         ),
                     )
@@ -224,13 +286,7 @@ class GeminiChatService:
                     event = await self.events.update(
                         user,
                         event_id,
-                        EventUpdate(
-                            title=payload.get("title"),
-                            notes=payload.get("notes"),
-                            location=payload.get("location"),
-                            start_at=_parse_dt(payload.get("start_at")),
-                            end_at=_parse_dt(payload.get("end_at")),
-                        ),
+                        self._event_update_payload(payload, default_tz),
                     )
                     entity_id = str(event.id)
                     summary = summary or f"Updated “{event.title}”"
@@ -242,6 +298,7 @@ class GeminiChatService:
                 else:
                     continue
             except Exception:
+                await self.db.rollback()
                 continue
 
             record = {
@@ -292,7 +349,9 @@ class GeminiChatService:
         message.actions = list(message.actions)
         await self.db.commit()
 
-    async def send(self, user: User, content: str) -> ChatMessage:
+    async def send(
+        self, user: User, content: str, *, timezone_name: Optional[str] = None
+    ) -> ChatMessage:
         await self._charge_if_hosted(user)
         api_key = self.user_service.resolve_gemini_key(user, self.settings)
 
@@ -304,20 +363,23 @@ class GeminiChatService:
         history = await self.history(user, limit=12)
         prompt = f"{content.strip()}\n\n[Current schedule context]\n{snapshot}"
         contents = _build_contents(history, prompt)
+        system_instruction = _system_prompt_with_clock(timezone_name)
 
         client = genai.Client(api_key=api_key)
         try:
             response = await client.aio.models.generate_content(
                 model=self.settings.gemini_model,
                 contents=contents,
-                config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
+                config=types.GenerateContentConfig(system_instruction=system_instruction),
             )
             raw_text = _response_text(response)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
 
         cleaned, raw_actions = _extract_actions_block(raw_text)
-        applied, linked = await self.apply_actions(user, raw_actions)
+        applied, linked = await self.apply_actions(
+            user, raw_actions, timezone_name=timezone_name
+        )
 
         assistant = ChatMessage(
             user_id=user.id,
@@ -331,7 +393,9 @@ class GeminiChatService:
         await self.db.refresh(assistant)
         return assistant
 
-    async def stream_tokens(self, user: User, content: str) -> AsyncIterator[str]:
+    async def stream_tokens(
+        self, user: User, content: str, *, timezone_name: Optional[str] = None
+    ) -> AsyncIterator[str]:
         """Yield SSE-friendly chunks: token deltas, then a final actions payload."""
         await self._charge_if_hosted(user)
         api_key = self.user_service.resolve_gemini_key(user, self.settings)
@@ -344,6 +408,7 @@ class GeminiChatService:
         history = await self.history(user, limit=12)
         prompt = f"{content.strip()}\n\n[Current schedule context]\n{snapshot}"
         contents = _build_contents(history, prompt)
+        system_instruction = _system_prompt_with_clock(timezone_name)
 
         client = genai.Client(api_key=api_key)
         full_text = ""
@@ -351,7 +416,7 @@ class GeminiChatService:
             stream = await client.aio.models.generate_content_stream(
                 model=self.settings.gemini_model,
                 contents=contents,
-                config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
+                config=types.GenerateContentConfig(system_instruction=system_instruction),
             )
             async for chunk in stream:
                 piece = _response_text(chunk)
@@ -364,7 +429,9 @@ class GeminiChatService:
             return
 
         cleaned, raw_actions = _extract_actions_block(full_text)
-        applied, linked = await self.apply_actions(user, raw_actions)
+        applied, linked = await self.apply_actions(
+            user, raw_actions, timezone_name=timezone_name
+        )
         assistant = ChatMessage(
             user_id=user.id,
             role=ChatRole.assistant,
@@ -391,16 +458,31 @@ class GeminiChatService:
         )
 
 
-def _parse_dt(value: Any) -> Optional[datetime]:
+def _parse_dt(value: Any, *, default_tz: Optional[ZoneInfo] = None) -> Optional[datetime]:
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    text = str(value).replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(text)
-    except ValueError:
-        return None
+        dt = value
+    else:
+        text = str(value).replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+    tz = default_tz or timezone.utc
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=tz)
+
+    # Models often stamp local wall times as Z/+00:00. If the user has a real
+    # local timezone, reinterpret the clock face in that zone.
+    offset = dt.utcoffset()
+    tz_key = getattr(tz, "key", None)
+    if (
+        tz_key
+        and tz_key != "UTC"
+        and offset is not None
+        and offset.total_seconds() == 0
+    ):
+        return dt.replace(tzinfo=None).replace(tzinfo=tz)
     return dt

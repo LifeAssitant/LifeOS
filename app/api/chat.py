@@ -36,7 +36,9 @@ async def send_message(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> ChatMessageOut:
-    message = await _chat_service(db, settings).send(user, payload.message)
+    message = await _chat_service(db, settings).send(
+        user, payload.message, timezone_name=payload.timezone
+    )
     return ChatMessageOut.model_validate(message)
 
 
@@ -50,7 +52,9 @@ async def stream_message(
     service = _chat_service(db, settings)
 
     async def event_generator():
-        async for chunk in service.stream_tokens(user, payload.message):
+        async for chunk in service.stream_tokens(
+            user, payload.message, timezone_name=payload.timezone
+        ):
             yield f"data: {chunk}\n\n"
         yield 'data: {"type":"close"}\n\n'
 

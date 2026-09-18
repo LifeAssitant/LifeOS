@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     Time,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -37,6 +38,7 @@ class TaskStatus(str, enum.Enum):
 class TaskSource(str, enum.Enum):
     chat = "chat"
     manual = "manual"
+    google = "google"
 
 
 class ChatRole(str, enum.Enum):
@@ -76,8 +78,11 @@ class User(Base, TimestampMixin):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     display_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    supabase_user_id: Mapped[Optional[str]] = mapped_column(
+        String(64), unique=True, nullable=True, index=True
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
@@ -96,6 +101,11 @@ class User(Base, TimestampMixin):
 
     expo_push_token: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     desktop_push_token: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    encrypted_google_refresh_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    google_calendar_connected: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     events: Mapped[list["Event"]] = relationship(back_populates="user", cascade="all, delete-orphan")
@@ -138,6 +148,9 @@ class Task(Base, TimestampMixin):
 
 class Event(Base, TimestampMixin):
     __tablename__ = "events"
+    __table_args__ = (
+        UniqueConstraint("user_id", "external_id", name="uq_events_user_external"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -156,6 +169,7 @@ class Event(Base, TimestampMixin):
         default=TaskSource.manual,
         nullable=False,
     )
+    external_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     last_reminded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="events")

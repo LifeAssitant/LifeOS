@@ -1,5 +1,6 @@
 from app.services.billing import BillingService
 from app.services.gemini import GeminiChatService
+from app.services.google_calendar import GoogleCalendarService
 from app.services.lifecycle import (
     AuthService,
     EventService,
@@ -15,6 +16,7 @@ __all__ = [
     "BillingService",
     "EventService",
     "GeminiChatService",
+    "GoogleCalendarService",
     "NotificationService",
     "ReminderScanner",
     "TaskService",

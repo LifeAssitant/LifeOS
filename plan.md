@@ -8,12 +8,12 @@ A calm, cute AI companion that turns overwhelm into a clear calendar of tasks an
 
 | Layer | Choice | Why |
 |-------|--------|-----|
-| Backend (`LifeOS`) | **FastAPI** + PostgreSQL + Redis | Async-friendly for Gemini streaming; light APIs; easy background workers for reminders |
+| Backend (`LifeOS`) | **FastAPI** + **Supabase Postgres** + Redis | Async-friendly for Gemini streaming; hosted DB; light APIs; reminder workers |
 | Mobile (`LifeOS_Mobile`) | **React Native + Expo** (Expo Router) | Strong push notifications; fast iteration |
 | Desktop (`LifeOS_Desktop`) | **Electron + React + Vite** | Reliable Windows tray + OS notifications + always-on background |
 | Shared logic | Small shared package (TypeScript types + API client) later; start duplicated if faster | Keep early velocity, extract when screens stabilize |
 | AI | **Google Gemini** | Chat → structured task/event extraction |
-| Auth | Email/password + JWT (refresh tokens) | Simple MVP; OAuth can come later |
+| Auth | Email/password JWT + **Google via Supabase Auth** | Dual path; Calendar connect is separate OAuth |
 | Billing | Stripe for hosted AI credits; Settings toggle for **BYOK** (user Gemini key stored encrypted) | Paid API vs own-key |
 
 **Not choosing Django** — admin/ORM are nice, but FastAPI fits streaming chat, lightweight mobile APIs, and reminder workers better for this product.

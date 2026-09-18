@@ -32,6 +32,16 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 30
 
+    supabase_url: str = ""
+    supabase_jwt_secret: str = ""
+
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_calendar_redirect_uri: str = (
+        "http://127.0.0.1:8000/api/v1/calendar/google/callback"
+    )
+    desktop_oauth_success_url: str = "lifeos://auth/calendar-connected"
+
     fernet_key: str = ""
 
     gemini_api_key: str = ""

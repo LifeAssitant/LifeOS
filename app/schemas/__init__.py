@@ -35,6 +35,10 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class GoogleAuthRequest(BaseModel):
+    access_token: str = Field(min_length=20, max_length=8000)
+
+
 # --- User / settings ---
 
 
@@ -50,6 +54,7 @@ class UserPublic(ORMModel):
     quiet_hours_enabled: bool
     quiet_hours_start: Optional[time]
     quiet_hours_end: Optional[time]
+    google_calendar_connected: bool = False
 
 
 class UserUpdate(BaseModel):
@@ -139,8 +144,22 @@ class EventOut(ORMModel):
     end_at: Optional[datetime]
     remind_at: Optional[datetime]
     source: TaskSource
+    external_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+class GoogleCalendarStatus(BaseModel):
+    connected: bool
+
+
+class GoogleCalendarConnectResponse(BaseModel):
+    url: str
+
+
+class GoogleCalendarSyncResponse(BaseModel):
+    synced: int
+    removed: int
 
 
 # --- Today ---

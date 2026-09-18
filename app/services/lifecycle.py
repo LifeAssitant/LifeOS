@@ -3,7 +3,8 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import Select, or_, select
+from jose import JWTError, jwt
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -46,6 +47,7 @@ def user_to_public(user: User) -> UserPublic:
         quiet_hours_enabled=user.quiet_hours_enabled,
         quiet_hours_start=user.quiet_hours_start,
         quiet_hours_end=user.quiet_hours_end,
+        google_calendar_connected=bool(user.google_calendar_connected),
     )
 
 
@@ -77,10 +79,67 @@ class AuthService:
     async def login(self, payload: LoginRequest) -> tuple[User, str, str]:
         result = await self.db.execute(select(User).where(User.email == payload.email.lower()))
         user = result.scalar_one_or_none()
-        if user is None or not verify_password(payload.password, user.password_hash):
+        if user is None:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        if not user.password_hash:
+            raise HTTPException(
+                status_code=401,
+                detail="This account uses Google sign-in",
+            )
+        if not verify_password(payload.password, user.password_hash):
             raise HTTPException(status_code=401, detail="Invalid email or password")
         if not user.is_active:
             raise HTTPException(status_code=403, detail="Account disabled")
+        return user, create_access_token(user.id, self.settings), create_refresh_token(
+            user.id, self.settings
+        )
+
+    async def login_with_google(self, access_token: str) -> tuple[User, str, str]:
+        claims = _verify_supabase_access_token(access_token, self.settings)
+        supabase_user_id = str(claims.get("sub") or "").strip()
+        email = str(claims.get("email") or "").strip().lower()
+        if not supabase_user_id or not email:
+            raise HTTPException(status_code=401, detail="Google token missing email")
+
+        meta = claims.get("user_metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        display_name = (
+            meta.get("full_name")
+            or meta.get("name")
+            or claims.get("name")
+            or email.split("@")[0]
+        )
+
+        result = await self.db.execute(
+            select(User).where(
+                or_(User.supabase_user_id == supabase_user_id, User.email == email)
+            )
+        )
+        user = result.scalars().first()
+        if user is None:
+            user = User(
+                email=email,
+                password_hash=None,
+                display_name=str(display_name)[:120] if display_name else None,
+                supabase_user_id=supabase_user_id,
+                credit_balance=self.settings.free_starter_credits,
+                ai_mode=AIMode.hosted,
+                remind_before_minutes=self.settings.default_remind_before_minutes,
+            )
+            self.db.add(user)
+        else:
+            user.supabase_user_id = supabase_user_id
+            if not user.display_name and display_name:
+                user.display_name = str(display_name)[:120]
+            if user.email != email:
+                user.email = email
+
+        if not user.is_active:
+            raise HTTPException(status_code=403, detail="Account disabled")
+
+        await self.db.commit()
+        await self.db.refresh(user)
         return user, create_access_token(user.id, self.settings), create_refresh_token(
             user.id, self.settings
         )
@@ -101,6 +160,24 @@ class AuthService:
         return create_access_token(user.id, self.settings), create_refresh_token(
             user.id, self.settings
         )
+
+
+def _verify_supabase_access_token(token: str, settings: Settings) -> dict:
+    secret = settings.supabase_jwt_secret
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase auth is not configured (SUPABASE_JWT_SECRET)",
+        )
+    try:
+        return jwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+            audience="authenticated",
+        )
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid Google / Supabase token") from exc
 
 
 class UserService:

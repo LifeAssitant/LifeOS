@@ -5,6 +5,7 @@ from app import __version__
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.schemas import (
+    GoogleAuthRequest,
     HealthResponse,
     LoginRequest,
     RefreshRequest,
@@ -38,6 +39,18 @@ async def login(
     settings: Settings = Depends(get_settings),
 ) -> TokenResponse:
     _, access, refresh = await AuthService(db, settings).login(payload)
+    return TokenResponse(access_token=access, refresh_token=refresh)
+
+
+@router.post("/auth/google", response_model=TokenResponse)
+async def google_auth(
+    payload: GoogleAuthRequest,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> TokenResponse:
+    _, access, refresh = await AuthService(db, settings).login_with_google(
+        payload.access_token
+    )
     return TokenResponse(access_token=access, refresh_token=refresh)
 
 

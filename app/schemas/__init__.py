@@ -214,6 +214,7 @@ class ChatAction(BaseModel):
         "update_event",
         "delete_task",
         "delete_event",
+        "create_daily_week",
     ]
     payload: dict[str, Any] = Field(default_factory=dict)
     entity_id: Optional[UUID] = None
@@ -232,6 +233,10 @@ class ChatMessageOut(ORMModel):
 class ChatUndoRequest(BaseModel):
     message_id: UUID
     action_index: int = 0
+
+
+class TranscribeResponse(BaseModel):
+    text: str
 
 
 # --- Billing ---

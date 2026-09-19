@@ -34,6 +34,12 @@ Use exactly this format at the end of your reply when taking actions:
 {"actions":[{"type":"create_task","summary":"Added Study","payload":{"title":"Study","due_at":"2026-09-19T16:00:00+05:30"}}]}
 ```
 
+Everyday for a week (one action, not seven):
+
+```json
+{"actions":[{"type":"create_daily_week","summary":"Added Gym every day this week","payload":{"kind":"event","title":"Gym","start_at":"2026-09-19T18:00:00+05:30","end_at":"2026-09-19T19:00:00+05:30","days":7}}]}
+```
+
 Allowed action types:
 - create_task: payload {title, notes?, due_at?}
 - update_task: payload {task_id, title?, notes?, due_at?, status?}
@@ -42,6 +48,8 @@ Allowed action types:
 - create_event: payload {title, start_at, end_at?, location?, notes?}
 - update_event: payload {event_id, title?, start_at?, end_at?, location?, notes?}
 - delete_event: payload {event_id}
+- create_daily_week: payload {kind:"task"|"event", title, notes?, location?, due_at?, start_at?, end_at?, days?:7}
+  One action fills the same item across consecutive days (default 7). Never emit 7 separate creates.
 
 === Time & IDs ===
 - Always use the user's local date/time and timezone from the [User clock] block.
@@ -71,6 +79,27 @@ Planning requests ("plan my day/week", "what should I do"):
 - Read open tasks + events, group by day, call out overload or empty gaps.
 - Suggest a concrete plan; ask confirmation if big moves are needed; apply updates once they agree or when they say "go ahead" / "rearrange".
 
+=== Everyday items (fill the next week) ===
+Some things are one-offs. Some are things the user might do every day. Notice the difference.
+
+Treat as likely everyday when they mention a routine-shaped activity: gym, workout, walk, run, commute, class, lecture, medication, prayer, meditation, study block, practice, standup, "I usually…", "I always…", morning/evening rituals.
+Treat as one-off when they pin a single date ("tomorrow", "this Friday"), name a unique appointment, or talk about a meeting/call that is not a repeating class.
+
+Then:
+1. Already known as daily — they said "every day" / "daily" / "each day" / "all week" / "the whole week", OR earlier in this chat they confirmed it is daily:
+   Use create_daily_week now. Do not ask again.
+   kind=task for todos (due_at = first day's time). kind=event for timed blocks (start_at + end_at of the first occurrence; duration is copied).
+   Start from the day they named, or today. days defaults to 7. Backend skips a day if that title already exists there.
+2. Might be daily, but they have not said so:
+   Create only the mentioned day (or today) with create_task / create_event.
+   Ask one short question, e.g. "Do you do this every day? I can put it on the next 7 days."
+   No create_daily_week yet.
+3. They answer yes / every day / this week:
+   Use create_daily_week for 7 days from the original time. Backend skips the day already created.
+4. Clearly one-off: never ask, never fill the week.
+
+Before filling a week, glance at the schedule. If that time is already packed on most days, say so and ask — otherwise just fill it.
+
 Conversation style:
 - Sound human: curious, decisive, kind — not corporate and not emoji-spammy (at most one light emoji).
 - Prefer questions over guessing when stakes are high (collisions, dropping something, moving a meeting).
@@ -78,7 +107,7 @@ Conversation style:
 
 Other:
 - If no schedule change is needed, omit the JSON block.
-- Never invent unrelated productivity features (habits, streaks, OKRs, etc.).
+- Do not invent habit streaks, gamification, OKRs, or other extra product features.
 - Do not create duplicate titles at the same time just to "acknowledge" a request.
 """
 
@@ -147,6 +176,75 @@ def _overlap_hints(tasks: list[Any], events: list[Any], *, tz: ZoneInfo) -> list
             + "\n  - ".join(items)
         )
     return hints[:8]
+
+
+def _local_day_key(dt: datetime, tz: ZoneInfo) -> str:
+    return dt.astimezone(tz).strftime("%Y-%m-%d")
+
+
+def _shift_local_days(dt: datetime, days: int, tz: ZoneInfo) -> datetime:
+    local = dt.astimezone(tz)
+    target = local.date() + timedelta(days=days)
+    return datetime.combine(target, local.time(), tzinfo=tz)
+
+
+def _is_week_repeat(payload: dict[str, Any]) -> bool:
+    repeat = str(
+        payload.get("repeat") or payload.get("recurrence") or payload.get("every") or ""
+    ).lower()
+    if repeat in {"daily", "every_day", "everyday", "every day", "week", "weekly"}:
+        return True
+    try:
+        days = int(payload.get("days") or 0)
+    except (TypeError, ValueError):
+        days = 0
+    return days >= 3
+
+
+def _default_local_morning(tz: ZoneInfo) -> datetime:
+    now = datetime.now(tz)
+    return now.replace(hour=9, minute=0, second=0, microsecond=0)
+
+
+def _fold_repeated_creates(applied: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """If the model emitted several same-title creates, show one undo chip."""
+    folded: list[dict[str, Any]] = []
+    i = 0
+    while i < len(applied):
+        cur = applied[i]
+        action_type = cur.get("type")
+        if action_type not in {"create_task", "create_event"}:
+            folded.append(cur)
+            i += 1
+            continue
+        title = ((cur.get("payload") or {}).get("title") or "").strip().casefold()
+        group = [cur]
+        j = i + 1
+        while j < len(applied) and applied[j].get("type") == action_type:
+            other = ((applied[j].get("payload") or {}).get("title") or "").strip().casefold()
+            if not title or other != title:
+                break
+            group.append(applied[j])
+            j += 1
+        if len(group) >= 3:
+            ids = [g["entity_id"] for g in group if g.get("entity_id")]
+            kind = "task" if action_type == "create_task" else "event"
+            label = (cur.get("payload") or {}).get("title") or "this"
+            folded.append(
+                {
+                    "type": "create_daily_week",
+                    "summary": f"Added {label} every day this week",
+                    "payload": {**(cur.get("payload") or {}), "kind": kind, "days": len(group)},
+                    "entity_id": ids[0] if ids else None,
+                    "entity_ids": ids,
+                    "kind": kind,
+                    "undoable": True,
+                }
+            )
+        else:
+            folded.extend(group)
+        i = j
+    return folded
 
 
 def _extract_actions_block(text: str) -> tuple[str, list[dict[str, Any]]]:
@@ -269,7 +367,10 @@ class GeminiChatService:
             f"Recent/upcoming events:\n{chr(10).join(event_lines) or '- none'}"
             f"{hint_block}\n\n"
             "Manager note: if the user asks to rearrange/prioritize, use update_* actions "
-            "on flexible items; keep FIXED items unless they explicitly move them."
+            "on flexible items; keep FIXED items unless they explicitly move them.\n"
+            "Everyday note: if a new item sounds like a daily routine and they have not "
+            "said so, ask before filling the week. If they already said daily / every day, "
+            "use create_daily_week (7 consecutive days)."
         )
 
     def _task_update_payload(
@@ -302,6 +403,102 @@ class GeminiChatService:
             data["end_at"] = _parse_dt(payload.get("end_at"), default_tz=default_tz)
         return EventUpdate(**data)
 
+    async def _occupied_title_days(
+        self, user: User, title: str, tz: ZoneInfo
+    ) -> set[str]:
+        needle = title.strip().casefold()
+        occupied: set[str] = set()
+        if not needle:
+            return occupied
+        window_start = _utcnow() - timedelta(days=1)
+        window_end = _utcnow() + timedelta(days=10)
+        tasks = await self.tasks.list_tasks(
+            user, status=TaskStatus.open, from_dt=window_start, to_dt=window_end
+        )
+        events = await self.events.list_events(
+            user, from_dt=window_start, to_dt=window_end
+        )
+        for task in tasks:
+            if task.title.strip().casefold() != needle or not task.due_at:
+                continue
+            occupied.add(_local_day_key(task.due_at, tz))
+        for event in events:
+            if event.title.strip().casefold() != needle:
+                continue
+            occupied.add(_local_day_key(event.start_at, tz))
+        return occupied
+
+    async def _create_daily_week(
+        self,
+        user: User,
+        payload: dict[str, Any],
+        *,
+        tz: ZoneInfo,
+    ) -> tuple[str, list[str], str]:
+        kind = str(payload.get("kind") or "task").strip().lower()
+        if kind not in {"task", "event"}:
+            kind = "event" if payload.get("start_at") else "task"
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            raise ValueError("daily week needs a title")
+
+        try:
+            days = int(payload.get("days") or 7)
+        except (TypeError, ValueError):
+            days = 7
+        days = max(1, min(days, 7))
+
+        first = _parse_dt(
+            payload.get("due_at") or payload.get("start_at"), default_tz=tz
+        ) or _default_local_morning(tz)
+        end_at = _parse_dt(payload.get("end_at"), default_tz=tz)
+        duration = (end_at - first) if end_at and end_at > first else timedelta(hours=1)
+
+        occupied = await self._occupied_title_days(user, title, tz)
+        for raw_skip in payload.get("skip_dates") or []:
+            occupied.add(str(raw_skip)[:10])
+
+        created_ids: list[str] = []
+        for offset in range(days):
+            when = _shift_local_days(first, offset, tz)
+            day_key = _local_day_key(when, tz)
+            if day_key in occupied:
+                continue
+            if kind == "event":
+                event = await self.events.create(
+                    user,
+                    EventCreate(
+                        title=title,
+                        notes=payload.get("notes"),
+                        location=payload.get("location"),
+                        start_at=when,
+                        end_at=when + duration,
+                        source=TaskSource.chat,
+                    ),
+                )
+                created_ids.append(str(event.id))
+            else:
+                task = await self.tasks.create(
+                    user,
+                    TaskCreate(
+                        title=title,
+                        notes=payload.get("notes"),
+                        due_at=when,
+                        source=TaskSource.chat,
+                    ),
+                )
+                created_ids.append(str(task.id))
+            occupied.add(day_key)
+
+        count = len(created_ids)
+        if count == 0:
+            raise ValueError("daily week created nothing new")
+        if count == 1:
+            summary = f"Added “{title}”"
+        else:
+            summary = f"Added “{title}” every day this week ({count} days)"
+        return kind, created_ids, summary
+
     async def apply_actions(
         self,
         user: User,
@@ -315,12 +512,25 @@ class GeminiChatService:
 
         for raw in actions:
             action_type = raw.get("type")
-            payload = raw.get("payload") or {}
+            payload = dict(raw.get("payload") or {})
             summary = raw.get("summary") or ""
             entity_id: Optional[str] = None
+            entity_ids: list[str] = []
+            week_kind: Optional[str] = None
+
+            original_type = action_type
+            if action_type in {"create_task", "create_event"} and _is_week_repeat(payload):
+                action_type = "create_daily_week"
+                payload["kind"] = "event" if original_type == "create_event" else "task"
 
             try:
-                if action_type == "create_task":
+                if action_type == "create_daily_week":
+                    week_kind, entity_ids, week_summary = await self._create_daily_week(
+                        user, payload, tz=default_tz
+                    )
+                    entity_id = entity_ids[0] if entity_ids else None
+                    summary = summary or week_summary
+                elif action_type == "create_task":
                     task = await self.tasks.create(
                         user,
                         TaskCreate(
@@ -390,14 +600,25 @@ class GeminiChatService:
                 "summary": summary,
                 "payload": payload,
                 "entity_id": entity_id,
+                "entity_ids": entity_ids or ([entity_id] if entity_id else []),
+                "kind": week_kind,
                 "undoable": action_type
-                in {"create_task", "create_event", "complete_task", "update_task", "update_event"},
+                in {
+                    "create_task",
+                    "create_event",
+                    "create_daily_week",
+                    "complete_task",
+                    "update_task",
+                    "update_event",
+                },
             }
             applied.append(record)
-            if entity_id:
+            if entity_ids:
+                linked.extend(entity_ids)
+            elif entity_id:
                 linked.append(entity_id)
 
-        return applied, linked
+        return _fold_repeated_creates(applied), linked
 
     async def undo_action(self, user: User, message_id: UUID, action_index: int) -> None:
         result = await self.db.execute(
@@ -415,17 +636,39 @@ class GeminiChatService:
 
         action = message.actions[action_index]
         action_type = action.get("type")
-        entity_id = action.get("entity_id")
-        if not entity_id:
+        entity_ids = [
+            UUID(str(item))
+            for item in (action.get("entity_ids") or [])
+            if item
+        ]
+        if not entity_ids and action.get("entity_id"):
+            entity_ids = [UUID(str(action["entity_id"]))]
+        if not entity_ids:
             raise HTTPException(status_code=400, detail="Action cannot be undone")
 
-        eid = UUID(str(entity_id))
-        if action_type == "create_task":
-            await self.tasks.delete(user, eid)
+        kind = str(action.get("kind") or (action.get("payload") or {}).get("kind") or "")
+        if action_type == "create_daily_week":
+            for eid in entity_ids:
+                try:
+                    if kind == "event":
+                        await self.events.delete(user, eid)
+                    else:
+                        await self.tasks.delete(user, eid)
+                except Exception:
+                    await self.db.rollback()
+                    try:
+                        if kind == "event":
+                            await self.tasks.delete(user, eid)
+                        else:
+                            await self.events.delete(user, eid)
+                    except Exception:
+                        await self.db.rollback()
+        elif action_type == "create_task":
+            await self.tasks.delete(user, entity_ids[0])
         elif action_type == "create_event":
-            await self.events.delete(user, eid)
+            await self.events.delete(user, entity_ids[0])
         elif action_type == "complete_task":
-            await self.tasks.update(user, eid, TaskUpdate(status=TaskStatus.open))
+            await self.tasks.update(user, entity_ids[0], TaskUpdate(status=TaskStatus.open))
         else:
             raise HTTPException(status_code=400, detail="This action type cannot be undone yet")
 
@@ -448,7 +691,8 @@ class GeminiChatService:
         prompt = (
             f"{content.strip()}\n\n"
             f"[Current schedule context]\n{snapshot}\n\n"
-            "Remember: collide → ask; clear rearrange orders → update flexible items now."
+            "Remember: collide → ask; everyday routine → ask or fill the next 7 days; "
+            "clear rearrange orders → update flexible items now."
         )
         contents = _build_contents(history, prompt)
         system_instruction = _system_prompt_with_clock(timezone_name)
@@ -497,7 +741,8 @@ class GeminiChatService:
         prompt = (
             f"{content.strip()}\n\n"
             f"[Current schedule context]\n{snapshot}\n\n"
-            "Remember: collide → ask; clear rearrange orders → update flexible items now."
+            "Remember: collide → ask; everyday routine → ask or fill the next 7 days; "
+            "clear rearrange orders → update flexible items now."
         )
         contents = _build_contents(history, prompt)
         system_instruction = _system_prompt_with_clock(timezone_name)
@@ -548,6 +793,75 @@ class GeminiChatService:
                 },
             }
         )
+
+    async def transcribe_audio(
+        self,
+        user: User,
+        audio: bytes,
+        mime_type: str,
+    ) -> str:
+        if user.ai_mode == AIMode.hosted:
+            enforce_hosted_chat_limit(user.id)
+        api_key = self.user_service.resolve_gemini_key(user, self.settings)
+        mime = _normalize_audio_mime(mime_type)
+        client = genai.Client(api_key=api_key)
+        try:
+            response = await client.aio.models.generate_content(
+                model=self.settings.gemini_model,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_bytes(data=audio, mime_type=mime),
+                            types.Part.from_text(
+                                text=(
+                                    "Transcribe this voice note. Return only the spoken words. "
+                                    "No quotes, labels, or commentary. "
+                                    "If there is no speech, return an empty string."
+                                )
+                            ),
+                        ],
+                    )
+                ],
+                config=types.GenerateContentConfig(temperature=0),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Could not hear that: {exc}") from exc
+        return _clean_transcript(_response_text(response))
+
+
+_AUDIO_MIME_ALIASES = {
+    "audio/mp4": "audio/mp4",
+    "audio/m4a": "audio/mp4",
+    "audio/x-m4a": "audio/mp4",
+    "audio/aac": "audio/aac",
+    "audio/mpeg": "audio/mp3",
+    "audio/mp3": "audio/mp3",
+    "audio/wav": "audio/wav",
+    "audio/wave": "audio/wav",
+    "audio/x-wav": "audio/wav",
+    "audio/webm": "audio/webm",
+    "video/webm": "audio/webm",
+    "audio/ogg": "audio/ogg",
+    "audio/opus": "audio/ogg",
+    "audio/flac": "audio/flac",
+    "audio/3gpp": "audio/3gpp",
+    "audio/amr": "audio/amr",
+    "audio/x-caf": "audio/aac",
+}
+
+
+def _normalize_audio_mime(value: str) -> str:
+    raw = (value or "").split(";")[0].strip().lower()
+    return _AUDIO_MIME_ALIASES.get(raw, raw or "audio/webm")
+
+
+def _clean_transcript(text: str) -> str:
+    cleaned = (text or "").strip().strip('"').strip("'")
+    lowered = cleaned.lower()
+    if lowered in {"", "empty", "(empty)", "[empty]", "no speech", "inaudible"}:
+        return ""
+    return cleaned
 
 
 def _parse_dt(value: Any, *, default_tz: Optional[ZoneInfo] = None) -> Optional[datetime]:

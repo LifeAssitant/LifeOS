@@ -86,6 +86,17 @@ class User(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Audience profile — answered once, right after onboarding.
+    # profession keeps the primary pick so it stays easy to filter on; professions holds all of them.
+    profession: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    professions: Mapped[Optional[list]] = mapped_column(JSONType, nullable=True)
+    age: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    busy_level: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    use_cases: Mapped[Optional[list]] = mapped_column(JSONType, nullable=True)
+    profile_completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     ai_mode: Mapped[AIMode] = mapped_column(
         Enum(AIMode, name="ai_mode", native_enum=False, length=16),
         default=AIMode.hosted,

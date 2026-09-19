@@ -5,7 +5,13 @@ from app.core.encryption import get_secret_box
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models import User
-from app.schemas import AISettingsUpdate, CreditsResponse, UserPublic, UserUpdate
+from app.schemas import (
+    AISettingsUpdate,
+    CreditsResponse,
+    ProfileSurvey,
+    UserPublic,
+    UserUpdate,
+)
 from app.services import UserService, user_to_public
 
 router = APIRouter(prefix="/me", tags=["users"])
@@ -23,6 +29,16 @@ async def update_me(
     db: AsyncSession = Depends(get_db),
 ) -> UserPublic:
     updated = await UserService(db, get_secret_box()).update_profile(user, payload)
+    return user_to_public(updated)
+
+
+@router.put("/profile", response_model=UserPublic)
+async def save_profile(
+    payload: ProfileSurvey,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserPublic:
+    updated = await UserService(db, get_secret_box()).save_profile_survey(user, payload)
     return user_to_public(updated)
 
 

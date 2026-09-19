@@ -43,6 +43,12 @@ _SCHEMA_PATCHES = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS encrypted_google_refresh_token TEXT",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_calendar_connected BOOLEAN DEFAULT FALSE NOT NULL",
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS external_id VARCHAR(255)",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS profession VARCHAR(120)",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS professions JSONB",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS age INTEGER",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS busy_level INTEGER",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS use_cases JSONB",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_completed_at TIMESTAMPTZ",
     """
     DO $$ BEGIN
       CREATE UNIQUE INDEX IF NOT EXISTS ix_users_supabase_user_id

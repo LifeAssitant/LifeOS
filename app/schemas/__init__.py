@@ -55,6 +55,29 @@ class UserPublic(ORMModel):
     quiet_hours_start: Optional[time]
     quiet_hours_end: Optional[time]
     google_calendar_connected: bool = False
+    profession: Optional[str] = None
+    professions: Optional[list[str]] = None
+    age: Optional[int] = None
+    busy_level: Optional[int] = None
+    use_cases: Optional[list[str]] = None
+    profile_completed: bool = False
+
+
+class ProfileSurvey(BaseModel):
+    """Audience questions answered once, between onboarding and the walkthrough."""
+
+    professions: Optional[list[str]] = Field(default=None, max_length=12)
+    age: Optional[int] = Field(default=None, ge=5, le=120)
+    busy_level: Optional[int] = Field(default=None, ge=1, le=5)
+    use_cases: Optional[list[str]] = Field(default=None, max_length=12)
+
+    @field_validator("use_cases", "professions")
+    @classmethod
+    def clean_list(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is None:
+            return None
+        cleaned = [item.strip()[:80] for item in value if item and item.strip()]
+        return cleaned or None
 
 
 class UserUpdate(BaseModel):

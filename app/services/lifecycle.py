@@ -22,6 +22,7 @@ from app.schemas import (
     EventCreate,
     EventUpdate,
     LoginRequest,
+    ProfileSurvey,
     RegisterRequest,
     TaskCreate,
     TaskUpdate,
@@ -48,6 +49,12 @@ def user_to_public(user: User) -> UserPublic:
         quiet_hours_start=user.quiet_hours_start,
         quiet_hours_end=user.quiet_hours_end,
         google_calendar_connected=bool(user.google_calendar_connected),
+        profession=user.profession,
+        professions=user.professions,
+        age=user.age,
+        busy_level=user.busy_level,
+        use_cases=user.use_cases,
+        profile_completed=user.profile_completed_at is not None,
     )
 
 
@@ -189,6 +196,17 @@ class UserService:
         data = payload.model_dump(exclude_unset=True)
         for key, value in data.items():
             setattr(user, key, value)
+        await self.db.commit()
+        await self.db.refresh(user)
+        return user
+
+    async def save_profile_survey(self, user: User, payload: ProfileSurvey) -> User:
+        data = payload.model_dump(exclude_unset=True)
+        for key, value in data.items():
+            setattr(user, key, value)
+        if payload.professions:
+            user.profession = payload.professions[0][:120]
+        user.profile_completed_at = _utcnow()
         await self.db.commit()
         await self.db.refresh(user)
         return user

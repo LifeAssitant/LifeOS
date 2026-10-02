@@ -8,7 +8,7 @@ A calm, cute AI companion that turns overwhelm into a clear calendar of tasks an
 
 | Layer | Choice | Why |
 |-------|--------|-----|
-| Backend (`LifeOS`) | **FastAPI** + **Supabase Postgres** + Redis | Async-friendly for Gemini streaming; hosted DB; light APIs; reminder workers |
+| Backend (`LifeOS`) | **FastAPI** + **Supabase Postgres** | Async-friendly for Gemini streaming; hosted DB; light APIs; reminder workers |
 | Mobile (`LifeOS_Mobile`) | **React Native + Expo** (Expo Router) | Strong push notifications; fast iteration |
 | Desktop (`LifeOS_Desktop`) | **Electron + React + Vite** | Reliable Windows tray + OS notifications + always-on background |
 | Shared logic | Small shared package (TypeScript types + API client) later; start duplicated if faster | Keep early velocity, extract when screens stabilize |
@@ -30,14 +30,12 @@ flowchart LR
     API[FastAPI]
     Worker[ReminderWorker]
     DB[(PostgreSQL)]
-    Queue[(Redis)]
     Gemini[Gemini_API]
   end
   Mobile --> API
   Desktop --> API
   API --> DB
   API --> Gemini
-  Worker --> Queue
   Worker --> DB
   Worker --> Mobile
   Worker --> Desktop
@@ -75,7 +73,7 @@ flowchart LR
 
 ### Phase 0 — Foundations
 
-- Scaffold FastAPI (auth, health, CORS), Postgres models/migrations, Docker Compose for local DB/Redis.
+- Scaffold FastAPI (auth, health, CORS), Supabase Postgres models/migrations, and Docker Compose.
 - Scaffold Expo (Router, auth screens) and Electron (window + tray stub).
 - Design tokens: colors, type, spacing; cute empty-state illustrations (static).
 
@@ -94,7 +92,7 @@ flowchart LR
 
 ### Phase 3 — Background reminders that feel alive
 
-- Redis-backed worker: due soon, overdue, “still open?” nudges.
+- Postgres advisory-lock worker: due soon, overdue, “still open?” nudges.
 - Mobile: Expo push notifications (and foreground banners).
 - Desktop: Electron tray + native notifications; app can stay minimized.
 - Preference: quiet hours, remind-before minutes.

@@ -25,7 +25,6 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "postgresql+asyncpg://lifeos:lifeos@localhost:5432/lifeos"
-    redis_url: str = "redis://localhost:6379/0"
 
     jwt_secret: str = "change-me-to-a-long-random-secret"
     jwt_algorithm: str = "HS256"

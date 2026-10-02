@@ -1,20 +1,23 @@
 # LifeOS Backend
 
-Calm AI LifeManager API — FastAPI + Supabase Postgres + Redis + Gemini.
+Calm AI LifeManager API — FastAPI + Supabase Postgres + Gemini.
 
 ## Quick start
 
 ```bash
 cp .env.example .env
-# Fill DATABASE_URL (Supabase), JWT_SECRET, FERNET_KEY,
+# Fill SUPABASE_DATABASE_URL (Session Pooler for Docker), JWT_SECRET, FERNET_KEY,
 # SUPABASE_JWT_SECRET, and optionally Google / Gemini / Stripe keys
 
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# Redis still used for reminder locks (local docker is fine)
-docker compose up -d redis
+# Start the API and reminder worker against Supabase.
+docker compose up -d --build api worker
+
+# Optional local Postgres rollback/source:
+docker compose --profile local-db up -d db
 
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
@@ -29,9 +32,9 @@ API docs: http://localhost:8000/docs
 ## Supabase + Google setup
 
 1. **Create a Supabase project** → Project Settings → Database → copy the connection string.  
-   Convert it to asyncpg form, e.g.  
-   `postgresql+asyncpg://postgres.YOUR_REF:PASSWORD@aws-0-REGION.pooler.supabase.com:6543/postgres`  
-   and set `DATABASE_URL`.
+   Copy the Session Pooler URI (port 5432) and set `SUPABASE_DATABASE_URL` for Docker.
+   URL-encode special characters in the password. For running FastAPI outside Docker,
+   set `DATABASE_URL` to the same URI.
 
 2. **API keys** → Project Settings → API: copy the **JWT Secret** into `SUPABASE_JWT_SECRET`, and the project URL into `SUPABASE_URL`.
 
@@ -56,11 +59,11 @@ API docs: http://localhost:8000/docs
 | Path | Role |
 |------|------|
 | `app/api` | HTTP routers (auth, tasks, events, today, chat, billing, calendar, notifications) |
-| `app/core` | JWT auth, Fernet encryption, rate limit, Redis client |
+| `app/core` | JWT auth, Fernet encryption, rate limit |
 | `app/models` | SQLAlchemy models |
 | `app/schemas` | Pydantic DTOs |
 | `app/services` | Domain logic (incl. Google Calendar sync) |
-| `app/workers` | Reminder scanner with Redis lock |
+| `app/workers` | Reminder scanner with a PostgreSQL advisory lock |
 
 ## AI modes
 

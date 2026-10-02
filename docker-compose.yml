@@ -1,5 +1,6 @@
 services:
   db:
+    profiles: ["local-db"]
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: lifeos
@@ -15,18 +16,6 @@ services:
       timeout: 5s
       retries: 10
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - lifeos_redis:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   api:
     build:
       context: .
@@ -34,15 +23,9 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://lifeos:lifeos@db:5432/lifeos
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${SUPABASE_DATABASE_URL:-postgresql+asyncpg://lifeos:lifeos@db:5432/lifeos}
     ports:
       - "8000:8000"
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./:/app
@@ -54,17 +37,10 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://lifeos:lifeos@db:5432/lifeos
-      REDIS_URL: redis://redis:6379/0
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      DATABASE_URL: ${SUPABASE_DATABASE_URL:-postgresql+asyncpg://lifeos:lifeos@db:5432/lifeos}
     command: python -m app.workers.reminder_worker
     volumes:
       - ./:/app
 
 volumes:
   lifeos_pg:
-  lifeos_redis:

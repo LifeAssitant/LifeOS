@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from urllib.parse import quote, unquote
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -7,9 +8,20 @@ from sqlalchemy.orm import DeclarativeBase
 from app.config import get_settings
 
 settings = get_settings()
+database_url = settings.database_url
+if ".pooler.supabase.com" in database_url:
+    scheme, remainder = database_url.split("://", 1)
+    credentials, endpoint = remainder.rsplit("@", 1)
+    username, password = credentials.split(":", 1)
+    if scheme in {"postgres", "postgresql"}:
+        scheme = "postgresql+asyncpg"
+    database_url = (
+        f"{scheme}://{quote(unquote(username), safe='')}:"
+        f"{quote(unquote(password), safe='')}@{endpoint}"
+    )
 
 engine = create_async_engine(
-    settings.database_url,
+    database_url,
     echo=settings.debug,
     pool_pre_ping=True,
 )

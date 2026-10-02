@@ -1,8 +1,4 @@
-"""Background reminder worker.
-
-Uses Redis as a distributed lock so only one scanner runs at a time.
-Run: python -m app.workers.reminder_worker
-"""
+"""Background reminder worker coordinated by a PostgreSQL advisory lock."""
 
 from __future__ import annotations
 
@@ -10,15 +6,32 @@ import asyncio
 import logging
 import uuid
 
+from sqlalchemy import text
+
 from app.config import get_settings
-from app.core.redis_client import close_redis, get_redis
-from app.database import AsyncSessionLocal
+from app.database import AsyncSessionLocal, engine
 from app.services.notifications import ReminderScanner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("lifeos.reminders")
 
-LOCK_KEY = "lifeos:reminder_lock"
+LOCK_ID = 6047161334812023
+
+
+async def scan_once(settings) -> None:
+    async with engine.connect() as lock_connection:
+        async with lock_connection.begin():
+            acquired = await lock_connection.scalar(
+                text("SELECT pg_try_advisory_xact_lock(:lock_id)"),
+                {"lock_id": LOCK_ID},
+            )
+            if not acquired:
+                return
+
+            async with AsyncSessionLocal() as session:
+                sent = await ReminderScanner(session, settings).run_once()
+                if sent:
+                    logger.info("Dispatched %s reminder(s)", sent)
 
 
 async def loop() -> None:
@@ -27,28 +40,10 @@ async def loop() -> None:
     logger.info("Reminder worker started id=%s poll=%ss", worker_id, settings.reminder_poll_seconds)
 
     while True:
-        acquired = False
         try:
-            r = await get_redis()
-            acquired = bool(
-                await r.set(LOCK_KEY, worker_id, nx=True, ex=settings.reminder_poll_seconds + 10)
-            )
-            if acquired:
-                async with AsyncSessionLocal() as session:
-                    sent = await ReminderScanner(session, settings).run_once()
-                    if sent:
-                        logger.info("Dispatched %s reminder(s)", sent)
+            await scan_once(settings)
         except Exception:
             logger.exception("Reminder scan failed")
-        finally:
-            if acquired:
-                try:
-                    r = await get_redis()
-                    current = await r.get(LOCK_KEY)
-                    if current == worker_id:
-                        await r.delete(LOCK_KEY)
-                except Exception:
-                    logger.exception("Failed to release reminder lock")
 
         await asyncio.sleep(settings.reminder_poll_seconds)
 
@@ -57,7 +52,7 @@ async def _main() -> None:
     try:
         await loop()
     finally:
-        await close_redis()
+        await engine.dispose()
 
 
 def main() -> None:

@@ -3,6 +3,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
+import httpx
 from jose import JWTError, jwt
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -102,7 +103,7 @@ class AuthService:
         )
 
     async def login_with_google(self, access_token: str) -> tuple[User, str, str]:
-        claims = _verify_supabase_access_token(access_token, self.settings)
+        claims = await _verify_supabase_access_token(access_token, self.settings)
         supabase_user_id = str(claims.get("sub") or "").strip()
         email = str(claims.get("email") or "").strip().lower()
         if not supabase_user_id or not email:
@@ -130,6 +131,7 @@ class AuthService:
                 password_hash=None,
                 display_name=str(display_name)[:120] if display_name else None,
                 supabase_user_id=supabase_user_id,
+                is_active=True,
                 credit_balance=self.settings.free_starter_credits,
                 ai_mode=AIMode.hosted,
                 remind_before_minutes=self.settings.default_remind_before_minutes,
@@ -169,18 +171,58 @@ class AuthService:
         )
 
 
-def _verify_supabase_access_token(token: str, settings: Settings) -> dict:
-    secret = settings.supabase_jwt_secret
-    if not secret:
-        raise HTTPException(
-            status_code=503,
-            detail="Supabase auth is not configured (SUPABASE_JWT_SECRET)",
+async def _verify_supabase_access_token(token: str, settings: Settings) -> dict:
+    try:
+        header = jwt.get_unverified_header(token)
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid Google / Supabase token") from exc
+
+    algorithm = header.get("alg")
+    if algorithm == "HS256":
+        if not settings.supabase_jwt_secret:
+            raise HTTPException(
+                status_code=503,
+                detail="Supabase auth is not configured (SUPABASE_JWT_SECRET)",
+            )
+        key = settings.supabase_jwt_secret
+    elif algorithm in {"ES256", "RS256"}:
+        if not settings.supabase_url:
+            raise HTTPException(
+                status_code=503,
+                detail="Supabase auth is not configured (SUPABASE_URL)",
+            )
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.get(
+                    f"{settings.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+                )
+                response.raise_for_status()
+                jwks = response.json().get("keys", [])
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Unable to retrieve Supabase signing keys",
+            ) from exc
+
+        key = next(
+            (
+                candidate
+                for candidate in jwks
+                if candidate.get("kid") == header.get("kid")
+                and candidate.get("alg", algorithm) == algorithm
+            ),
+            None,
         )
+        if key is None:
+            raise HTTPException(status_code=401, detail="Unknown Supabase signing key")
+    else:
+        raise HTTPException(status_code=401, detail="Unsupported Supabase token algorithm")
+
     try:
         return jwt.decode(
             token,
-            secret,
-            algorithms=["HS256"],
+            key,
+            algorithms=[algorithm],
             audience="authenticated",
         )
     except JWTError as exc:

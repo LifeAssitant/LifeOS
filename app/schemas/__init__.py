@@ -251,6 +251,36 @@ class CreditsResponse(BaseModel):
     ai_mode: AIMode
 
 
+# --- Garden store ---
+
+
+class GardenItemOut(BaseModel):
+    sku: str
+    name: str
+    description: str
+    category: str
+    credit_cost: int
+    owned: bool = False
+
+
+class GardenCatalogResponse(BaseModel):
+    credit_balance: int
+    items: List[GardenItemOut]
+    tasks_completed_lifetime: int = 0
+    task_credit_interval: int = 50
+    tasks_until_next_credit: int = 50
+
+
+class GardenPurchaseRequest(BaseModel):
+    sku: str = Field(min_length=2, max_length=64)
+
+
+class GardenPurchaseResponse(BaseModel):
+    credit_balance: int
+    owned_skus: List[str]
+    item: GardenItemOut
+
+
 # --- Notifications ---
 
 

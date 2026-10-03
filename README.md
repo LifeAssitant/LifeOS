@@ -19,7 +19,7 @@ docker compose up -d --build api worker
 # Optional local Postgres rollback/source:
 docker compose --profile local-db up -d db
 
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 # separate terminal — reminders
 python -m app.workers.reminder_worker

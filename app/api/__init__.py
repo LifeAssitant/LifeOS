@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api import auth, billing, calendar, chat, events, tasks, today, users
+from app.api import auth, billing, calendar, chat, events, garden, tasks, today, users
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -11,3 +11,4 @@ api_router.include_router(today.router)
 api_router.include_router(chat.router)
 api_router.include_router(billing.router)
 api_router.include_router(calendar.router)
+api_router.include_router(garden.router)

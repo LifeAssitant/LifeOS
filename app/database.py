@@ -61,6 +61,7 @@ _SCHEMA_PATCHES = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS busy_level INTEGER",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS use_cases JSONB",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_completed_at TIMESTAMPTZ",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS tasks_completed_lifetime INTEGER DEFAULT 0 NOT NULL",
     """
     DO $$ BEGIN
       CREATE UNIQUE INDEX IF NOT EXISTS ix_users_supabase_user_id

@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.core.encryption import SecretBox
 from app.core.security import (
     create_access_token,
@@ -344,7 +344,12 @@ class TaskService:
     async def update(self, user: User, task_id: UUID, payload: TaskUpdate) -> Task:
         task = await self.get(user, task_id)
         data = payload.model_dump(exclude_unset=True)
-        if "status" in data and data["status"] == TaskStatus.done and task.status != TaskStatus.done:
+        newly_completed = (
+            "status" in data
+            and data["status"] == TaskStatus.done
+            and task.status != TaskStatus.done
+        )
+        if newly_completed:
             task.completed_at = _utcnow()
         if "status" in data and data["status"] == TaskStatus.open:
             task.completed_at = None
@@ -354,6 +359,13 @@ class TaskService:
             task.remind_at = _default_remind_at(
                 task.due_at, None, user.remind_before_minutes
             )
+        if newly_completed:
+            settings = get_settings()
+            interval = max(1, settings.task_credit_interval)
+            reward = max(0, settings.task_credit_reward)
+            user.tasks_completed_lifetime = (user.tasks_completed_lifetime or 0) + 1
+            if reward and user.tasks_completed_lifetime % interval == 0:
+                user.credit_balance += reward
         await self.db.commit()
         await self.db.refresh(task)
         return task

@@ -104,6 +104,8 @@ class User(Base, TimestampMixin):
     )
     encrypted_gemini_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     credit_balance: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Monotonic count of task completions (never decreases on reopen).
+    tasks_completed_lifetime: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     remind_before_minutes: Mapped[int] = mapped_column(Integer, default=15, nullable=False)
     quiet_hours_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -124,6 +126,9 @@ class User(Base, TimestampMixin):
         back_populates="user", cascade="all, delete-orphan"
     )
     notifications: Mapped[list["NotificationLog"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    garden_items: Mapped[list["UserGardenItem"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -231,3 +236,22 @@ class NotificationLog(Base, TimestampMixin):
     meta: Mapped[Optional[dict]] = mapped_column(JSONType, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="notifications")
+
+
+class UserGardenItem(Base, TimestampMixin):
+    """Cosmetic / extra garden props bought with credits."""
+
+    __tablename__ = "user_garden_items"
+    __table_args__ = (
+        UniqueConstraint("user_id", "sku", name="uq_user_garden_items_user_sku"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    sku: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+    user: Mapped["User"] = relationship(back_populates="garden_items")

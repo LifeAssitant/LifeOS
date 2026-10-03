@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.0-flash"
     hosted_chat_credit_cost: int = 1
     free_starter_credits: int = 50
+    # Earn garden/AI credits by finishing work: 1 credit every N completions.
+    task_credit_interval: int = 50
+    task_credit_reward: int = 1
 
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""

@@ -1,6 +1,7 @@
-from typing import List
+from typing import List, Optional
+import base64
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,33 +66,46 @@ async def stream_message(
 
 @router.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe_audio(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(default=None),
+    audio_base64: Optional[str] = Form(default=None),
+    mime_type: str = Form(default="audio/wav"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> TranscribeResponse:
-    audio = await file.read()
+    audio = b""
+    mime = mime_type or "audio/wav"
+    if file is not None:
+        audio = await file.read()
+        mime = file.content_type or mime
+        name = (file.filename or "").lower()
+        if mime in {"application/octet-stream", "binary/octet-stream"}:
+            if name.endswith(".webm"):
+                mime = "audio/webm"
+            elif name.endswith(".m4a") or name.endswith(".mp4"):
+                mime = "audio/mp4"
+            elif name.endswith(".wav"):
+                mime = "audio/wav"
+            elif name.endswith(".mp3"):
+                mime = "audio/mpeg"
+            elif name.endswith(".ogg"):
+                mime = "audio/ogg"
+            elif name.endswith(".aac"):
+                mime = "audio/aac"
+            elif name.endswith(".caf"):
+                mime = "audio/x-caf"
+    elif audio_base64:
+        try:
+            audio = base64.b64decode(audio_base64, validate=False)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Voice clip was unreadable.") from exc
+        mime = mime_type or "audio/wav"
+    else:
+        raise HTTPException(status_code=400, detail="No voice clip was sent.")
     if not audio or len(audio) < 200:
         raise HTTPException(status_code=400, detail="That clip was too quiet. Tap the mic, speak, then tap again to send.")
     if len(audio) > MAX_AUDIO_BYTES:
         raise HTTPException(status_code=413, detail="Voice clip is too long. Try a shorter message.")
-    mime = file.content_type or "application/octet-stream"
-    name = (file.filename or "").lower()
-    if mime in {"application/octet-stream", "binary/octet-stream"}:
-        if name.endswith(".webm"):
-            mime = "audio/webm"
-        elif name.endswith(".m4a") or name.endswith(".mp4"):
-            mime = "audio/mp4"
-        elif name.endswith(".wav"):
-            mime = "audio/wav"
-        elif name.endswith(".mp3"):
-            mime = "audio/mpeg"
-        elif name.endswith(".ogg"):
-            mime = "audio/ogg"
-        elif name.endswith(".aac"):
-            mime = "audio/aac"
-        elif name.endswith(".caf"):
-            mime = "audio/x-caf"
     text = await _chat_service(db, settings).transcribe_audio(user, audio, mime)
     if not text:
         raise HTTPException(

@@ -15,3 +15,7 @@ google-genai==1.75.0
 stripe==11.4.1
 python-multipart==0.0.20
 tzdata==2025.2
+pytest==8.3.5
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1

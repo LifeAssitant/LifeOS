@@ -57,6 +57,7 @@ class NotificationKind(str, enum.Enum):
     due_soon = "due_soon"
     overdue = "overdue"
     still_open = "still_open"
+    check_in = "check_in"
 
 
 class TimestampMixin:
@@ -114,6 +115,11 @@ class User(Base, TimestampMixin):
 
     expo_push_token: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     desktop_push_token: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    last_check_in_notified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Durable planning preferences remembered across chats (list of short notes).
+    ai_memory: Mapped[Optional[list]] = mapped_column(JSONType, nullable=True)
 
     encrypted_google_refresh_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     google_calendar_connected: Mapped[bool] = mapped_column(

@@ -62,6 +62,23 @@ class Settings(BaseSettings):
 
     reminder_poll_seconds: int = 30
     default_remind_before_minutes: int = 15
+    # Silence window before check-in (prompt gap + push nudge). Midpoint of 5–6h.
+    chat_check_in_hours: float = 5.5
+
+    # Langfuse conversation traces. Both keys must be set before anything is exported.
+    # US region: https://us.cloud.langfuse.com
+    langfuse_secret_key: str = ""
+    langfuse_public_key: str = ""
+    langfuse_base_url: str = "https://us.cloud.langfuse.com"
+
+    # Optional extra OpenTelemetry export. Langfuse does not need these.
+    otel_traces_enabled: bool = False
+    otel_service_name: str = "lifeos-api"
+    otel_exporter_otlp_endpoint: str = ""
+    otel_exporter_otlp_headers: str = ""
+    otel_traces_console: bool = False
+    # When true, spans store the user message and assistant reply.
+    trace_capture_content: bool = False
 
     @property
     def is_dev(self) -> bool:

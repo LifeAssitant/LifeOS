@@ -15,14 +15,50 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core.rate_limit import enforce_hosted_chat_limit
+from app.core.tracing import (
+    actions_span,
+    conversation_span,
+    finish_turn,
+    model_span,
+    note_context,
+    record_error,
+)
 from app.models import AIMode, ChatMessage, ChatRole, TaskSource, TaskStatus, User
 from app.schemas import EventCreate, EventUpdate, TaskCreate, TaskUpdate
+from app.services.action_guard import sanitize_actions
 from app.services.lifecycle import EventService, TaskService, UserService
 
+MAX_AI_MEMORY = 20
+_PREF_PATTERNS = (
+    re.compile(r"(?i)\bdon'?t move (my )?mornings?\b"),
+    re.compile(r"(?i)\b(no|never) (move|schedule).{0,24}\b(mornings?|evenings?|nights?)\b"),
+    re.compile(r"(?i)\bi (usually|always|prefer to) work\b.{0,40}"),
+    re.compile(r"(?i)\b(busy|blocked|free) (before|after|until|from)\b.{0,30}"),
+    re.compile(r"(?i)\bkeep (mornings?|evenings?|afternoons?) (free|clear|open)\b"),
+    re.compile(r"(?i)\bprefer(s|ences?)?:?.{0,60}"),
+)
 
-SYSTEM_PROMPT = """You are LifeOS — a calm, human life manager (not a dumb calendar bot).
-You protect the user's time: notice conflicts, protect fixed commitments, and rearrange flexible work with care.
-Be warm, brief, and conversational. Ask a clear question when something is ambiguous.
+
+SYSTEM_PROMPT = """You are LifeOS — a warm, human life manager sitting with the user (not a stiff calendar bot).
+Your only job is helping them talk through, plan, and manage their time: tasks, calendar, priorities, routines, reminders, and rearranging the day or week.
+Protect their time: notice conflicts, keep fixed commitments, and move flexible work with care.
+
+=== Scope (hard) ===
+IN SCOPE: planning, tasks, events, priorities, routines, reminders, focus blocks, "what should I do", rearranging the day/week, checking how the day is going as it relates to the plan.
+OUT OF SCOPE: homework answers, coding/debugging help, medical or legal advice, general trivia, essays, therapy-as-treatment, roleplay, or anything unrelated to managing their life schedule.
+If they go off-topic: one short, kind redirect back to planning (e.g. "I stay on plans and calendars — want to put a study block on today instead?"). Never emit a JSON actions block for off-scope asks.
+
+=== Ask vs act (clear intention) ===
+Ask first (no actions yet) when:
+- time/priority is ambiguous, or two options are equally plausible
+- a new item would collide with something already scheduled
+- moving/deleting a FIXED item (meetings, "can't move", appointments)
+- filling a possible everyday routine they have not confirmed as daily
+
+Act now with JSON actions when:
+- they gave a clear instruction ("add gym at 6", "mark study done", "move coding after the 2pm meeting")
+- they confirmed a choice you offered ("go ahead", "yes every day", "put it after")
+- they asked to rearrange/prioritize and FIXED vs FLEXIBLE is clear from their words + schedule context
 
 When creating, updating, completing, or deleting tasks/events, respond with:
 1) A short natural message (manager tone)
@@ -50,6 +86,8 @@ Allowed action types:
 - delete_event: payload {event_id}
 - create_daily_week: payload {kind:"task"|"event", title, notes?, location?, due_at?, start_at?, end_at?, days?:7}
   One action fills the same item across consecutive days (default 7). Never emit 7 separate creates.
+- remember: payload {note} — durable planning preference (e.g. "don't move mornings", "works best after 10am").
+  Use when they state a lasting preference. Never invent preferences. Never emit remember while also asking a confirmation question.
 
 === Time & IDs ===
 - Always use the user's local date/time and timezone from the [User clock] block.
@@ -100,10 +138,12 @@ Then:
 
 Before filling a week, glance at the schedule. If that time is already packed on most days, say so and ask — otherwise just fill it.
 
-Conversation style:
+=== Conversation style ===
 - Sound human: curious, decisive, kind — not corporate and not emoji-spammy (at most one light emoji).
-- Prefer questions over guessing when stakes are high (collisions, dropping something, moving a meeting).
+- Keep replies short. Prefer one sharp question over a list of questions.
 - Prefer action over endless chat when instructions are already clear.
+- If a [Conversation gap] block is present, open with a brief human check-in about their day/plan (use schedule context), then help with what they just said. One question + one useful next step — no lecture.
+- If a [First chat] block is present, welcome lightly and ask what to put on the calendar.
 
 Other:
 - If no schedule change is needed, omit the JSON block.
@@ -138,6 +178,21 @@ def _system_prompt_with_clock(tz_name: Optional[str]) -> str:
         f"- utc_offset: {offset_fmt}\n"
         f"- Use this clock for every relative date/time.\n"
     )
+
+
+def _hours_since(earlier: datetime, later: datetime) -> float:
+    if earlier.tzinfo is None:
+        earlier = earlier.replace(tzinfo=timezone.utc)
+    if later.tzinfo is None:
+        later = later.replace(tzinfo=timezone.utc)
+    return max(0.0, (later - earlier).total_seconds() / 3600.0)
+
+
+TURN_REMINDER = (
+    "Remember: stay on planning/managing only; collide or unclear → ask (no actions); "
+    "clear rearrange/create/complete orders → act now; everyday routine → ask or fill the next 7 days; "
+    "off-topic → brief redirect, no JSON."
+)
 
 
 def _overlap_hints(tasks: list[Any], events: list[Any], *, tz: ZoneInfo) -> list[str]:
@@ -320,6 +375,62 @@ class GeminiChatService:
         rows.reverse()
         return rows
 
+    async def _previous_user_message_at(
+        self, user: User, *, exclude_id: Optional[UUID] = None
+    ) -> Optional[datetime]:
+        """Timestamp of the latest prior user message (excluding the one just saved)."""
+        stmt = (
+            select(ChatMessage.created_at)
+            .where(
+                ChatMessage.user_id == user.id,
+                ChatMessage.role == ChatRole.user,
+            )
+            .order_by(ChatMessage.created_at.desc())
+            .limit(1)
+        )
+        if exclude_id is not None:
+            stmt = stmt.where(ChatMessage.id != exclude_id)
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    def _gap_prompt_block(self, previous_user_at: Optional[datetime]) -> str:
+        threshold_h = float(self.settings.chat_check_in_hours)
+        if previous_user_at is None:
+            return (
+                "[First chat]\n"
+                "- This is their first message with you.\n"
+                "- Welcome lightly in one short line, then ask what to put on the calendar "
+                "or what today should look like. Help with their message after that.\n"
+            )
+        hours = _hours_since(previous_user_at, _utcnow())
+        if hours < threshold_h:
+            return ""
+        rounded = round(hours, 1)
+        return (
+            "[Conversation gap]\n"
+            f"- It has been about {rounded} hours since they last messaged you "
+            f"(threshold {threshold_h}h).\n"
+            "- Open with one brief human check-in about their day or plan "
+            "(use the schedule context). Then help with what they just said.\n"
+            "- One question + one useful next step. No lecture, no emoji spam.\n"
+        )
+
+    def _build_user_prompt(
+        self,
+        content: str,
+        snapshot: str,
+        *,
+        previous_user_at: Optional[datetime],
+    ) -> str:
+        gap = self._gap_prompt_block(previous_user_at)
+        gap_section = f"{gap}\n" if gap else ""
+        return (
+            f"{content.strip()}\n\n"
+            f"[Current schedule context]\n{snapshot}\n\n"
+            f"{gap_section}"
+            f"{TURN_REMINDER}"
+        )
+
     async def _charge_if_hosted(self, user: User) -> None:
         if user.ai_mode != AIMode.hosted:
             return
@@ -334,17 +445,124 @@ class GeminiChatService:
         await self.db.commit()
         await self.db.refresh(user)
 
+    def _memory_lines(self, user: User) -> list[str]:
+        raw = getattr(user, "ai_memory", None) or []
+        if not isinstance(raw, list):
+            return []
+        lines: list[str] = []
+        for item in raw[:MAX_AI_MEMORY]:
+            if isinstance(item, str) and item.strip():
+                lines.append(item.strip())
+            elif isinstance(item, dict):
+                note = str(item.get("note") or item.get("text") or "").strip()
+                if note:
+                    lines.append(note)
+        return lines
+
+    async def _remember_note(self, user: User, note: str) -> str:
+        cleaned = " ".join((note or "").strip().split())
+        if not cleaned:
+            raise ValueError("empty preference")
+        if len(cleaned) > 180:
+            cleaned = cleaned[:177] + "…"
+        memory = list(self._memory_lines(user))
+        key = cleaned.casefold()
+        memory = [m for m in memory if m.casefold() != key]
+        memory.append(cleaned)
+        user.ai_memory = memory[-MAX_AI_MEMORY:]
+        await self.db.commit()
+        await self.db.refresh(user)
+        return cleaned
+
+    async def _ingest_user_preferences(self, user: User, content: str) -> None:
+        text = (content or "").strip()
+        if not text:
+            return
+        for pattern in _PREF_PATTERNS:
+            match = pattern.search(text)
+            if not match:
+                continue
+            note = match.group(0).strip(" .,:;")
+            if len(note) < 8:
+                continue
+            try:
+                await self._remember_note(user, note)
+            except Exception:
+                await self.db.rollback()
+            break
+
+    async def day_load(
+        self, user: User, *, timezone_name: Optional[str] = None
+    ) -> tuple[int, int]:
+        """Open tasks overall and events starting today (for check-in copy)."""
+        tz = _resolve_tz(timezone_name)
+        local_now = datetime.now(tz)
+        day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        tasks = await self.tasks.list_tasks(user, status=TaskStatus.open)
+        events = await self.events.list_events(user, from_dt=day_start, to_dt=day_end)
+        return len(tasks), len(events)
+
+    async def soft_greeting(
+        self, user: User, *, timezone_name: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Template check-in when chat opens after a gap — no Gemini, no credit charge."""
+        previous = await self._previous_user_message_at(user)
+        threshold_h = float(self.settings.chat_check_in_hours)
+        if previous is None:
+            return {
+                "show": True,
+                "kind": "first",
+                "hours_since": None,
+                "message": "Hey — what should we get on the calendar first?",
+            }
+        hours = _hours_since(previous, _utcnow())
+        if hours < threshold_h:
+            return {"show": False, "kind": None, "hours_since": hours, "message": None}
+
+        task_n, event_n = await self.day_load(user, timezone_name=timezone_name)
+        if task_n or event_n:
+            bits: list[str] = []
+            if task_n:
+                bits.append(f"{task_n} open task{'s' if task_n != 1 else ''}")
+            if event_n:
+                bits.append(f"{event_n} event{'s' if event_n != 1 else ''}")
+            load = " and ".join(bits)
+            message = f"Welcome back — today looks like {load}. Want to plan the next few hours?"
+        else:
+            message = "Welcome back — today’s pretty open. What should we line up?"
+        return {
+            "show": True,
+            "kind": "gap",
+            "hours_since": round(hours, 1),
+            "message": message,
+        }
+
     async def _context_snapshot(
         self, user: User, *, timezone_name: Optional[str] = None
     ) -> str:
-        open_tasks = await self.tasks.list_tasks(user, status=TaskStatus.open)
-        recent_events = await self.events.list_events(
-            user, from_dt=_utcnow() - timedelta(days=60)
-        )
         tz = _resolve_tz(timezone_name)
+        local_now = datetime.now(tz)
+        day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        window_start = day_start - timedelta(days=1)
+        window_end = day_start + timedelta(days=14)
+
+        open_tasks = await self.tasks.list_tasks(
+            user,
+            status=TaskStatus.open,
+            from_dt=window_start,
+            to_dt=window_end,
+        )
+        recent_events = await self.events.list_events(
+            user, from_dt=window_start, to_dt=window_end
+        )
+        # Keep context small when the horizon is quiet.
+        task_cap = 8 if len(open_tasks) <= 3 and len(recent_events) <= 2 else 15
+        event_cap = 8 if len(recent_events) <= 2 else 24
+
         task_lines = [
             f"- [{t.id}] {t.title} due={t.due_at.isoformat() if t.due_at else 'none'} (flexible unless user says fixed)"
-            for t in open_tasks[:25]
+            for t in open_tasks[:task_cap]
         ]
         event_lines = [
             (
@@ -353,19 +571,31 @@ class GeminiChatService:
                 f" source={e.source.value if hasattr(e.source, 'value') else e.source}"
                 f"{' (treat as FIXED)' if str(getattr(e.source, 'value', e.source)) == 'google' else ''}"
             )
-            for e in recent_events[:40]
+            for e in recent_events[:event_cap]
         ]
-        hints = _overlap_hints(open_tasks, recent_events, tz=tz)
-        hint_block = (
-            "\n\nPossible busy days / collisions to resolve as a manager:\n"
-            + "\n".join(f"- {h}" for h in hints)
-            if hints
-            else "\n\nNo multi-item busy days flagged — still check before stacking same times."
+        hints = _overlap_hints(open_tasks[:task_cap], recent_events[:event_cap], tz=tz)
+        if open_tasks or recent_events:
+            hint_block = (
+                "\n\nPossible busy days / collisions to resolve as a manager:\n"
+                + "\n".join(f"- {h}" for h in hints)
+                if hints
+                else "\n\nNo multi-item busy days flagged — still check before stacking same times."
+            )
+        else:
+            hint_block = "\n\nSchedule looks light in the next two weeks — keep suggestions small."
+
+        memory = self._memory_lines(user)
+        memory_block = (
+            "\n\nKnown planning preferences (honor these):\n"
+            + "\n".join(f"- {m}" for m in memory)
+            if memory
+            else "\n\nKnown planning preferences: none saved yet."
         )
         return (
-            f"Open tasks:\n{chr(10).join(task_lines) or '- none'}\n\n"
-            f"Recent/upcoming events:\n{chr(10).join(event_lines) or '- none'}"
-            f"{hint_block}\n\n"
+            f"Open tasks (yesterday → +14 days):\n{chr(10).join(task_lines) or '- none'}\n\n"
+            f"Events (yesterday → +14 days):\n{chr(10).join(event_lines) or '- none'}"
+            f"{hint_block}"
+            f"{memory_block}\n\n"
             "Manager note: if the user asks to rearrange/prioritize, use update_* actions "
             "on flexible items; keep FIXED items unless they explicitly move them.\n"
             "Everyday note: if a new item sounds like a daily routine and they have not "
@@ -505,12 +735,14 @@ class GeminiChatService:
         actions: list[dict[str, Any]],
         *,
         timezone_name: Optional[str] = None,
+        assistant_text: str = "",
     ) -> tuple[list[dict[str, Any]], list[str]]:
         applied: list[dict[str, Any]] = []
         linked: list[str] = []
         default_tz = _resolve_tz(timezone_name)
+        safe_actions = sanitize_actions(actions, assistant_text=assistant_text)
 
-        for raw in actions:
+        for raw in safe_actions:
             action_type = raw.get("type")
             payload = dict(raw.get("payload") or {})
             summary = raw.get("summary") or ""
@@ -524,7 +756,10 @@ class GeminiChatService:
                 payload["kind"] = "event" if original_type == "create_event" else "task"
 
             try:
-                if action_type == "create_daily_week":
+                if action_type == "remember":
+                    note = await self._remember_note(user, str(payload.get("note") or ""))
+                    summary = summary or f"Remembered: {note}"
+                elif action_type == "create_daily_week":
                     week_kind, entity_ids, week_summary = await self._create_daily_week(
                         user, payload, tz=default_tz
                     )
@@ -608,9 +843,9 @@ class GeminiChatService:
                     "create_event",
                     "create_daily_week",
                     "complete_task",
-                    "update_task",
-                    "update_event",
                 },
+                "changed_schedule": action_type
+                not in {"remember"},
             }
             applied.append(record)
             if entity_ids:
@@ -621,6 +856,14 @@ class GeminiChatService:
         return _fold_repeated_creates(applied), linked
 
     async def undo_action(self, user: User, message_id: UUID, action_index: int) -> None:
+        with conversation_span("lifeos.chat.undo", user=user, settings=self.settings) as span:
+            span.set_attribute("lifeos.message_id", str(message_id))
+            span.set_attribute("lifeos.action_index", int(action_index))
+            await self._undo_action(user, message_id, action_index, span)
+
+    async def _undo_action(
+        self, user: User, message_id: UUID, action_index: int, span: Any
+    ) -> None:
         result = await self.db.execute(
             select(ChatMessage).where(
                 ChatMessage.id == message_id,
@@ -635,6 +878,7 @@ class GeminiChatService:
             raise HTTPException(status_code=400, detail="Invalid action index")
 
         action = message.actions[action_index]
+        span.set_attribute("lifeos.action_type", str(action.get("type") or ""))
         action_type = action.get("type")
         entity_ids = [
             UUID(str(item))
@@ -679,120 +923,168 @@ class GeminiChatService:
     async def send(
         self, user: User, content: str, *, timezone_name: Optional[str] = None
     ) -> ChatMessage:
-        await self._charge_if_hosted(user)
-        api_key = self.user_service.resolve_gemini_key(user, self.settings)
+        with conversation_span(
+            "lifeos.chat.send",
+            user=user,
+            settings=self.settings,
+            timezone_name=timezone_name,
+            content=content,
+        ) as span:
+            await self._charge_if_hosted(user)
+            api_key = self.user_service.resolve_gemini_key(user, self.settings)
 
-        user_msg = ChatMessage(user_id=user.id, role=ChatRole.user, content=content.strip())
-        self.db.add(user_msg)
-        await self.db.commit()
+            user_msg = ChatMessage(user_id=user.id, role=ChatRole.user, content=content.strip())
+            self.db.add(user_msg)
+            await self.db.commit()
+            await self.db.refresh(user_msg)
 
-        snapshot = await self._context_snapshot(user, timezone_name=timezone_name)
-        history = await self.history(user, limit=12)
-        prompt = (
-            f"{content.strip()}\n\n"
-            f"[Current schedule context]\n{snapshot}\n\n"
-            "Remember: collide → ask; everyday routine → ask or fill the next 7 days; "
-            "clear rearrange orders → update flexible items now."
-        )
-        contents = _build_contents(history, prompt)
-        system_instruction = _system_prompt_with_clock(timezone_name)
-
-        client = genai.Client(api_key=api_key)
-        try:
-            response = await client.aio.models.generate_content(
-                model=self.settings.gemini_model,
-                contents=contents,
-                config=types.GenerateContentConfig(system_instruction=system_instruction),
+            await self._ingest_user_preferences(user, content)
+            previous_user_at = await self._previous_user_message_at(
+                user, exclude_id=user_msg.id
             )
-            raw_text = _response_text(response)
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
+            snapshot = await self._context_snapshot(user, timezone_name=timezone_name)
+            history = await self.history(user, limit=12)
+            prompt = self._build_user_prompt(
+                content, snapshot, previous_user_at=previous_user_at
+            )
+            note_context(span, prompt=prompt, history_count=len(history))
+            contents = _build_contents(history, prompt)
+            system_instruction = _system_prompt_with_clock(timezone_name)
 
-        cleaned, raw_actions = _extract_actions_block(raw_text)
-        applied, linked = await self.apply_actions(
-            user, raw_actions, timezone_name=timezone_name
-        )
+            client = genai.Client(api_key=api_key)
+            with model_span(self.settings) as generation:
+                try:
+                    response = await client.aio.models.generate_content(
+                        model=self.settings.gemini_model,
+                        contents=contents,
+                        config=types.GenerateContentConfig(system_instruction=system_instruction),
+                    )
+                except Exception as exc:
+                    raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
+                generation.observe(response)
+                raw_text = _response_text(response)
 
-        assistant = ChatMessage(
-            user_id=user.id,
-            role=ChatRole.assistant,
-            content=cleaned or "All set.",
-            actions=applied or None,
-            linked_entity_ids=linked or None,
-        )
-        self.db.add(assistant)
-        await self.db.commit()
-        await self.db.refresh(assistant)
-        return assistant
+            cleaned, raw_actions = _extract_actions_block(raw_text)
+            with actions_span(len(raw_actions)):
+                applied, linked = await self.apply_actions(
+                    user,
+                    raw_actions,
+                    timezone_name=timezone_name,
+                    assistant_text=cleaned,
+                )
+
+            assistant = ChatMessage(
+                user_id=user.id,
+                role=ChatRole.assistant,
+                content=cleaned or "All set.",
+                actions=applied or None,
+                linked_entity_ids=linked or None,
+            )
+            self.db.add(assistant)
+            await self.db.commit()
+            await self.db.refresh(assistant)
+            finish_turn(
+                span,
+                settings=self.settings,
+                reply=assistant.content,
+                actions=applied,
+                proposed=len(raw_actions),
+            )
+            return assistant
 
     async def stream_tokens(
         self, user: User, content: str, *, timezone_name: Optional[str] = None
     ) -> AsyncIterator[str]:
         """Yield SSE-friendly chunks: token deltas, then a final actions payload."""
-        await self._charge_if_hosted(user)
-        api_key = self.user_service.resolve_gemini_key(user, self.settings)
+        with conversation_span(
+            "lifeos.chat.stream",
+            user=user,
+            settings=self.settings,
+            timezone_name=timezone_name,
+            content=content,
+        ) as span:
+            await self._charge_if_hosted(user)
+            api_key = self.user_service.resolve_gemini_key(user, self.settings)
 
-        user_msg = ChatMessage(user_id=user.id, role=ChatRole.user, content=content.strip())
-        self.db.add(user_msg)
-        await self.db.commit()
+            user_msg = ChatMessage(user_id=user.id, role=ChatRole.user, content=content.strip())
+            self.db.add(user_msg)
+            await self.db.commit()
+            await self.db.refresh(user_msg)
 
-        snapshot = await self._context_snapshot(user, timezone_name=timezone_name)
-        history = await self.history(user, limit=12)
-        prompt = (
-            f"{content.strip()}\n\n"
-            f"[Current schedule context]\n{snapshot}\n\n"
-            "Remember: collide → ask; everyday routine → ask or fill the next 7 days; "
-            "clear rearrange orders → update flexible items now."
-        )
-        contents = _build_contents(history, prompt)
-        system_instruction = _system_prompt_with_clock(timezone_name)
-
-        client = genai.Client(api_key=api_key)
-        full_text = ""
-        try:
-            stream = await client.aio.models.generate_content_stream(
-                model=self.settings.gemini_model,
-                contents=contents,
-                config=types.GenerateContentConfig(system_instruction=system_instruction),
+            await self._ingest_user_preferences(user, content)
+            previous_user_at = await self._previous_user_message_at(
+                user, exclude_id=user_msg.id
             )
-            async for chunk in stream:
-                piece = _response_text(chunk)
-                if not piece:
-                    continue
-                full_text += piece
-                yield json.dumps({"type": "token", "text": piece})
-        except Exception as exc:
-            yield json.dumps({"type": "error", "detail": str(exc)})
-            return
+            snapshot = await self._context_snapshot(user, timezone_name=timezone_name)
+            history = await self.history(user, limit=12)
+            prompt = self._build_user_prompt(
+                content, snapshot, previous_user_at=previous_user_at
+            )
+            note_context(span, prompt=prompt, history_count=len(history))
+            contents = _build_contents(history, prompt)
+            system_instruction = _system_prompt_with_clock(timezone_name)
 
-        cleaned, raw_actions = _extract_actions_block(full_text)
-        applied, linked = await self.apply_actions(
-            user, raw_actions, timezone_name=timezone_name
-        )
-        assistant = ChatMessage(
-            user_id=user.id,
-            role=ChatRole.assistant,
-            content=cleaned or "All set.",
-            actions=applied or None,
-            linked_entity_ids=linked or None,
-        )
-        self.db.add(assistant)
-        await self.db.commit()
-        await self.db.refresh(assistant)
+            client = genai.Client(api_key=api_key)
+            full_text = ""
+            with model_span(self.settings) as generation:
+                try:
+                    stream = await client.aio.models.generate_content_stream(
+                        model=self.settings.gemini_model,
+                        contents=contents,
+                        config=types.GenerateContentConfig(system_instruction=system_instruction),
+                    )
+                    async for chunk in stream:
+                        generation.observe(chunk)
+                        piece = _response_text(chunk)
+                        if not piece:
+                            continue
+                        full_text += piece
+                        yield json.dumps({"type": "token", "text": piece})
+                except Exception as exc:
+                    record_error(generation.span, exc)
+                    record_error(span, exc)
+                    yield json.dumps({"type": "error", "detail": str(exc)})
+                    return
 
-        yield json.dumps(
-            {
-                "type": "done",
-                "message": {
-                    "id": str(assistant.id),
-                    "role": assistant.role.value,
-                    "content": assistant.content,
-                    "actions": assistant.actions,
-                    "linked_entity_ids": assistant.linked_entity_ids,
-                    "created_at": assistant.created_at.isoformat(),
-                },
-            }
-        )
+            cleaned, raw_actions = _extract_actions_block(full_text)
+            with actions_span(len(raw_actions)):
+                applied, linked = await self.apply_actions(
+                    user,
+                    raw_actions,
+                    timezone_name=timezone_name,
+                    assistant_text=cleaned,
+                )
+            assistant = ChatMessage(
+                user_id=user.id,
+                role=ChatRole.assistant,
+                content=cleaned or "All set.",
+                actions=applied or None,
+                linked_entity_ids=linked or None,
+            )
+            self.db.add(assistant)
+            await self.db.commit()
+            await self.db.refresh(assistant)
+            finish_turn(
+                span,
+                settings=self.settings,
+                reply=assistant.content,
+                actions=applied,
+                proposed=len(raw_actions),
+            )
+
+            yield json.dumps(
+                {
+                    "type": "done",
+                    "message": {
+                        "id": str(assistant.id),
+                        "role": assistant.role.value,
+                        "content": assistant.content,
+                        "actions": assistant.actions,
+                        "linked_entity_ids": assistant.linked_entity_ids,
+                        "created_at": assistant.created_at.isoformat(),
+                    },
+                }
+            )
 
     async def transcribe_audio(
         self,
@@ -800,34 +1092,55 @@ class GeminiChatService:
         audio: bytes,
         mime_type: str,
     ) -> str:
-        if user.ai_mode == AIMode.hosted:
-            enforce_hosted_chat_limit(user.id)
-        api_key = self.user_service.resolve_gemini_key(user, self.settings)
-        mime = _normalize_audio_mime(mime_type)
-        client = genai.Client(api_key=api_key)
-        try:
-            response = await client.aio.models.generate_content(
-                model=self.settings.gemini_model,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[
-                            types.Part.from_bytes(data=audio, mime_type=mime),
-                            types.Part.from_text(
-                                text=(
-                                    "Transcribe this voice note. Return only the spoken words. "
-                                    "No quotes, labels, or commentary. "
-                                    "If there is no speech, return an empty string."
-                                )
-                            ),
+        with conversation_span(
+            "lifeos.chat.transcribe",
+            user=user,
+            settings=self.settings,
+        ) as span:
+            if user.ai_mode == AIMode.hosted:
+                enforce_hosted_chat_limit(user.id)
+            api_key = self.user_service.resolve_gemini_key(user, self.settings)
+            mime = _normalize_audio_mime(mime_type)
+            span.set_attribute("lifeos.audio_bytes", len(audio))
+            span.set_attribute("lifeos.audio_mime", mime)
+            client = genai.Client(api_key=api_key)
+            with model_span(self.settings) as generation:
+                try:
+                    response = await client.aio.models.generate_content(
+                        model=self.settings.gemini_model,
+                        contents=[
+                            types.Content(
+                                role="user",
+                                parts=[
+                                    types.Part.from_bytes(data=audio, mime_type=mime),
+                                    types.Part.from_text(
+                                        text=(
+                                            "Transcribe this voice note. Return only the spoken words. "
+                                            "No quotes, labels, or commentary. "
+                                            "If there is no speech, return an empty string."
+                                        )
+                                    ),
+                                ],
+                            )
                         ],
+                        config=types.GenerateContentConfig(temperature=0),
                     )
-                ],
-                config=types.GenerateContentConfig(temperature=0),
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Could not hear that: {exc}") from exc
-        return _clean_transcript(_response_text(response))
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=502, detail=f"Could not hear that: {exc}"
+                    ) from exc
+                generation.observe(response)
+            text = _clean_transcript(_response_text(response))
+            span.set_attribute("lifeos.transcript_chars", len(text))
+            if self.settings.trace_capture_content and text:
+                finish_turn(
+                    span,
+                    settings=self.settings,
+                    reply=text,
+                    actions=[],
+                    proposed=0,
+                )
+            return text
 
 
 _AUDIO_MIME_ALIASES = {

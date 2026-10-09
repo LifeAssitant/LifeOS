@@ -10,7 +10,13 @@ from app.core.encryption import get_secret_box
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models import User
-from app.schemas import ChatMessageOut, ChatSendRequest, ChatUndoRequest, TranscribeResponse
+from app.schemas import (
+    ChatGreetingOut,
+    ChatMessageOut,
+    ChatSendRequest,
+    ChatUndoRequest,
+    TranscribeResponse,
+)
 from app.services import GeminiChatService, UserService
 
 MAX_AUDIO_BYTES = 8 * 1024 * 1024
@@ -30,6 +36,20 @@ async def list_messages(
 ) -> List[ChatMessageOut]:
     messages = await _chat_service(db, settings).history(user)
     return [ChatMessageOut.model_validate(m) for m in messages]
+
+
+@router.get("/greeting", response_model=ChatGreetingOut)
+async def chat_greeting(
+    timezone: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> ChatGreetingOut:
+    """Soft on-return check-in. No Gemini call and no credit charge."""
+    payload = await _chat_service(db, settings).soft_greeting(
+        user, timezone_name=timezone
+    )
+    return ChatGreetingOut.model_validate(payload)
 
 
 @router.post("/send", response_model=ChatMessageOut)

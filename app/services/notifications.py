@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
 import httpx
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.models import (
+    ChatMessage,
+    ChatRole,
     Event,
     NotificationChannel,
     NotificationKind,
@@ -98,6 +100,7 @@ class NotificationService:
         body: str,
         entity_type: Optional[str] = None,
         entity_id: Optional[UUID] = None,
+        data: Optional[dict] = None,
     ) -> None:
         if _in_quiet_hours(user, _utcnow()):
             await self.log(
@@ -114,12 +117,18 @@ class NotificationService:
             return
 
         delivered_any = False
+        expo_data = {
+            "kind": kind.value,
+            "entity_type": entity_type,
+            "entity_id": str(entity_id) if entity_id else None,
+            **(data or {}),
+        }
         if user.expo_push_token:
             ok = await self.send_expo(
                 user.expo_push_token,
                 title,
                 body,
-                {"kind": kind.value, "entity_type": entity_type, "entity_id": str(entity_id) if entity_id else None},
+                expo_data,
             )
             await self.log(
                 user=user,
@@ -175,6 +184,7 @@ class ReminderScanner:
         sent += await self._scan_tasks(now)
         sent += await self._scan_events(now)
         sent += await self._scan_still_open(now)
+        sent += await self._scan_chat_check_ins(now)
         return sent
 
     async def _scan_tasks(self, now: datetime) -> int:
@@ -264,3 +274,95 @@ class ReminderScanner:
             count += 1
         await self.db.commit()
         return count
+
+    async def _scan_chat_check_ins(self, now: datetime) -> int:
+        """Nudge users who have been quiet in chat for chat_check_in_hours."""
+        hours = float(self.settings.chat_check_in_hours)
+        threshold = now - timedelta(hours=hours)
+
+        last_user_msg = (
+            select(
+                ChatMessage.user_id.label("user_id"),
+                func.max(ChatMessage.created_at).label("last_at"),
+            )
+            .where(ChatMessage.role == ChatRole.user)
+            .group_by(ChatMessage.user_id)
+            .subquery()
+        )
+
+        result = await self.db.execute(
+            select(User, last_user_msg.c.last_at)
+            .outerjoin(last_user_msg, last_user_msg.c.user_id == User.id)
+            .where(
+                User.is_active.is_(True),
+                User.onboarding_completed.is_(True),
+                or_(
+                    User.expo_push_token.is_not(None),
+                    User.desktop_push_token.is_not(None),
+                ),
+                or_(
+                    User.last_check_in_notified_at.is_(None),
+                    User.last_check_in_notified_at <= threshold,
+                ),
+                or_(
+                    last_user_msg.c.last_at.is_(None),
+                    last_user_msg.c.last_at <= threshold,
+                ),
+                or_(
+                    last_user_msg.c.last_at.is_not(None),
+                    User.created_at <= threshold,
+                ),
+            )
+            .limit(50)
+        )
+
+        count = 0
+        for user, _last_at in result.all():
+            if _in_quiet_hours(user, now):
+                # Retry on a later poll once quiet hours end.
+                continue
+            body = await self._check_in_body(user, now)
+            await self.notifications.notify_user(
+                user,
+                kind=NotificationKind.check_in,
+                title="LifeOS",
+                body=body,
+                data={"screen": "chat"},
+            )
+            user.last_check_in_notified_at = now
+            count += 1
+        await self.db.commit()
+        return count
+
+    async def _check_in_body(self, user: User, now: datetime) -> str:
+        """Personalized nudge using today's open load."""
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Approximate local day with UTC day boundaries; good enough for nudge copy.
+        day_end = day_start + timedelta(days=1)
+
+        open_tasks = await self.db.execute(
+            select(func.count())
+            .select_from(Task)
+            .where(Task.user_id == user.id, Task.status == TaskStatus.open)
+        )
+        task_n = int(open_tasks.scalar_one() or 0)
+
+        today_events = await self.db.execute(
+            select(func.count())
+            .select_from(Event)
+            .where(
+                Event.user_id == user.id,
+                Event.start_at >= day_start,
+                Event.start_at < day_end,
+            )
+        )
+        event_n = int(today_events.scalar_one() or 0)
+
+        if task_n or event_n:
+            bits: list[str] = []
+            if task_n:
+                bits.append(f"{task_n} open task{'s' if task_n != 1 else ''}")
+            if event_n:
+                bits.append(f"{event_n} event{'s' if event_n != 1 else ''} today")
+            return f"You have {' and '.join(bits)}. Want to plan the next few hours?"
+        return "How's the day going — want to plan the next few hours?"

@@ -5,13 +5,19 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import api_router
 from app.config import get_settings
+from app.core.tracing import setup_tracing, shutdown_tracing
 from app.database import init_db
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    settings = get_settings()
+    setup_tracing(settings)
     await init_db()
-    yield
+    try:
+        yield
+    finally:
+        shutdown_tracing()
 
 
 def create_app() -> FastAPI:

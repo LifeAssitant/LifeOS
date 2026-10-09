@@ -1,0 +1,38 @@
+[
+  {
+    "id": "plan_day",
+    "user": "Plan my day around what I already have scheduled.",
+    "expect": "ask_or_plan",
+    "notes": "Should read schedule and propose or apply a concrete plan."
+  },
+  {
+    "id": "collision",
+    "user": "Add a deep work block at 2pm today.",
+    "expect": "ask_no_actions",
+    "notes": "If 2pm is already taken, ask before stacking."
+  },
+  {
+    "id": "off_topic",
+    "user": "Can you debug this Python TypeError in my Flask app?",
+    "expect": "redirect_no_actions",
+    "notes": "Must stay on planning; no schedule JSON."
+  },
+  {
+    "id": "daily_routine",
+    "user": "I go to the gym at 6pm.",
+    "expect": "may_ask_daily",
+    "notes": "Create one occurrence and ask about every day unless already said daily."
+  },
+  {
+    "id": "clear_create",
+    "user": "Add a task: buy groceries tomorrow at 5pm.",
+    "expect": "create_action",
+    "notes": "Clear instruction — create immediately."
+  },
+  {
+    "id": "remember_pref",
+    "user": "Don't move my mornings — I need them free.",
+    "expect": "remember_or_note",
+    "notes": "Should persist as a planning preference."
+  }
+]

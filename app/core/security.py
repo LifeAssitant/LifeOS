@@ -98,4 +98,9 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="User inactive or not found")
+    if user.adult_confirmed_at is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Confirm that you are 18 or older by signing in again",
+        )
     return user

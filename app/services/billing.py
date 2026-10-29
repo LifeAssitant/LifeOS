@@ -1,9 +1,13 @@
+from uuid import UUID
+
 from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 import stripe
 
 from app.config import Settings
-from app.models import User
+from app.models import ProcessedStripeEvent, User
 from app.schemas import CheckoutResponse
 
 
@@ -15,10 +19,14 @@ class BillingService:
             stripe.api_key = settings.stripe_secret_key
 
     def _ensure_stripe(self) -> None:
-        if not self.settings.stripe_secret_key or not self.settings.stripe_price_id_credits:
+        if (
+            not self.settings.billing_enabled
+            or not self.settings.stripe_secret_key
+            or not self.settings.stripe_price_id_credits
+        ):
             raise HTTPException(
                 status_code=503,
-                detail="Stripe billing is not configured",
+                detail="Paid credit purchases are not available",
             )
 
     async def create_checkout(self, user: User) -> CheckoutResponse:
@@ -47,27 +55,47 @@ class BillingService:
                 sig_header=signature,
                 secret=self.settings.stripe_webhook_secret,
             )
-        except Exception as exc:
+        except (ValueError, stripe.error.SignatureVerificationError) as exc:
             raise HTTPException(status_code=400, detail=f"Invalid webhook: {exc}") from exc
 
         if event["type"] == "checkout.session.completed":
             session = event["data"]["object"]
+            if session.get("payment_status") != "paid":
+                return {"received": True}
+
             meta = session.get("metadata") or {}
             user_id = meta.get("user_id")
-            credits = int(meta.get("credits") or self.settings.credits_per_purchase)
-            if user_id:
-                from uuid import UUID
+            event_id = event.get("id")
+            try:
+                credits = int(meta.get("credits") or self.settings.credits_per_purchase)
+                user_uuid = UUID(user_id)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="Invalid checkout metadata") from exc
+            if not event_id or credits <= 0:
+                raise HTTPException(status_code=400, detail="Invalid checkout event")
 
-                from sqlalchemy import select
-
-                from app.models import User as UserModel
-
-                result = await self.db.execute(
-                    select(UserModel).where(UserModel.id == UUID(user_id))
+            self.db.add(
+                ProcessedStripeEvent(id=event_id, event_type=event["type"])
+            )
+            try:
+                await self.db.flush()
+            except IntegrityError:
+                await self.db.rollback()
+                existing = await self.db.execute(
+                    select(ProcessedStripeEvent.id).where(
+                        ProcessedStripeEvent.id == event_id
+                    )
                 )
-                user = result.scalar_one_or_none()
-                if user:
-                    user.credit_balance += credits
-                    await self.db.commit()
+                if existing.scalar_one_or_none() is not None:
+                    return {"received": True}
+                raise
+
+            result = await self.db.execute(select(User).where(User.id == user_uuid))
+            user = result.scalar_one_or_none()
+            if user is None:
+                await self.db.rollback()
+                raise HTTPException(status_code=404, detail="Checkout account not found")
+            user.credit_balance += credits
+            await self.db.commit()
 
         return {"received": True}

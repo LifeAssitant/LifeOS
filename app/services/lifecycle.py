@@ -52,7 +52,6 @@ def user_to_public(user: User) -> UserPublic:
         google_calendar_connected=bool(user.google_calendar_connected),
         profession=user.profession,
         professions=user.professions,
-        age=user.age,
         busy_level=user.busy_level,
         use_cases=user.use_cases,
         profile_completed=user.profile_completed_at is not None,
@@ -73,6 +72,7 @@ class AuthService:
             email=payload.email.lower(),
             password_hash=hash_password(payload.password),
             display_name=payload.display_name,
+            adult_confirmed_at=_utcnow(),
             credit_balance=self.settings.free_starter_credits,
             ai_mode=AIMode.hosted,
             remind_before_minutes=self.settings.default_remind_before_minutes,
@@ -98,6 +98,9 @@ class AuthService:
             raise HTTPException(status_code=401, detail="Invalid email or password")
         if not user.is_active:
             raise HTTPException(status_code=403, detail="Account disabled")
+        if user.adult_confirmed_at is None:
+            user.adult_confirmed_at = _utcnow()
+            await self.db.commit()
         return user, create_access_token(user.id, self.settings), create_refresh_token(
             user.id, self.settings
         )
@@ -131,6 +134,7 @@ class AuthService:
                 password_hash=None,
                 display_name=str(display_name)[:120] if display_name else None,
                 supabase_user_id=supabase_user_id,
+                adult_confirmed_at=_utcnow(),
                 is_active=True,
                 credit_balance=self.settings.free_starter_credits,
                 ai_mode=AIMode.hosted,
@@ -139,6 +143,8 @@ class AuthService:
             self.db.add(user)
         else:
             user.supabase_user_id = supabase_user_id
+            if user.adult_confirmed_at is None:
+                user.adult_confirmed_at = _utcnow()
             if not user.display_name and display_name:
                 user.display_name = str(display_name)[:120]
             if user.email != email:
@@ -166,6 +172,11 @@ class AuthService:
         user = result.scalar_one_or_none()
         if user is None or not user.is_active:
             raise HTTPException(status_code=401, detail="User not found")
+        if user.adult_confirmed_at is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Sign in again and confirm that you are 18 or older",
+            )
         return create_access_token(user.id, self.settings), create_refresh_token(
             user.id, self.settings
         )

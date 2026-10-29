@@ -439,11 +439,16 @@ class GeminiChatService:
         if user.credit_balance < cost:
             raise HTTPException(
                 status_code=402,
-                detail="Not enough AI credits. Buy credits or switch to your own Gemini key.",
+                detail="Not enough AI credits. Complete tasks to earn credits or switch to your own Gemini key.",
             )
         user.credit_balance -= cost
         await self.db.commit()
         await self.db.refresh(user)
+
+    async def _refund_hosted_credit(self, user: User) -> None:
+        if user.ai_mode == AIMode.hosted:
+            user.credit_balance += self.settings.hosted_chat_credit_cost
+            await self.db.commit()
 
     def _memory_lines(self, user: User) -> list[str]:
         raw = getattr(user, "ai_memory", None) or []
@@ -930,8 +935,8 @@ class GeminiChatService:
             timezone_name=timezone_name,
             content=content,
         ) as span:
-            await self._charge_if_hosted(user)
             api_key = self.user_service.resolve_gemini_key(user, self.settings)
+            await self._charge_if_hosted(user)
 
             user_msg = ChatMessage(user_id=user.id, role=ChatRole.user, content=content.strip())
             self.db.add(user_msg)
@@ -960,6 +965,7 @@ class GeminiChatService:
                         config=types.GenerateContentConfig(system_instruction=system_instruction),
                     )
                 except Exception as exc:
+                    await self._refund_hosted_credit(user)
                     raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
                 generation.observe(response)
                 raw_text = _response_text(response)
@@ -1003,8 +1009,8 @@ class GeminiChatService:
             timezone_name=timezone_name,
             content=content,
         ) as span:
-            await self._charge_if_hosted(user)
             api_key = self.user_service.resolve_gemini_key(user, self.settings)
+            await self._charge_if_hosted(user)
 
             user_msg = ChatMessage(user_id=user.id, role=ChatRole.user, content=content.strip())
             self.db.add(user_msg)
@@ -1043,6 +1049,7 @@ class GeminiChatService:
                 except Exception as exc:
                     record_error(generation.span, exc)
                     record_error(span, exc)
+                    await self._refund_hosted_credit(user)
                     yield json.dumps({"type": "error", "detail": str(exc)})
                     return
 

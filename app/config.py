@@ -1,8 +1,17 @@
 from functools import lru_cache
 from typing import List
 
+from cryptography.fernet import Fernet
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_UNSAFE_JWT_SECRETS = {
+    "",
+    "change-me-to-a-long-random-secret",
+    "secret",
+    "changeme",
+}
 
 
 class Settings(BaseSettings):
@@ -54,6 +63,7 @@ class Settings(BaseSettings):
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_price_id_credits: str = ""
+    billing_enabled: bool = False
     stripe_success_url: str = "http://localhost:5173/settings?credits=success"
     stripe_cancel_url: str = "http://localhost:5173/settings?credits=cancel"
     credits_per_purchase: int = 100
@@ -83,6 +93,40 @@ class Settings(BaseSettings):
     @property
     def is_dev(self) -> bool:
         return self.app_env.lower() in {"development", "dev", "local"}
+
+    def validate_production(self) -> None:
+        if self.is_dev:
+            return
+
+        problems: list[str] = []
+        if self.debug:
+            problems.append("DEBUG must be false")
+        if (
+            self.jwt_secret.strip().lower() in _UNSAFE_JWT_SECRETS
+            or len(self.jwt_secret) < 32
+        ):
+            problems.append("JWT_SECRET must be a strong secret of at least 32 characters")
+        if not self.fernet_key:
+            problems.append("FERNET_KEY is required")
+        else:
+            try:
+                Fernet(self.fernet_key.encode())
+            except (ValueError, TypeError):
+                problems.append("FERNET_KEY must be a valid Fernet key")
+        if not self.cors_origins or "*" in self.cors_origins:
+            problems.append("CORS_ORIGINS must explicitly list trusted origins")
+        elif not any(origin.startswith("https://") for origin in self.cors_origins):
+            problems.append("Production CORS_ORIGINS must include an HTTPS website origin")
+        elif any(
+            origin != "null" and not origin.startswith("https://")
+            for origin in self.cors_origins
+        ):
+            problems.append("Production CORS_ORIGINS must use HTTPS")
+        if not self.database_url.startswith(("postgresql://", "postgresql+asyncpg://")):
+            problems.append("DATABASE_URL must use PostgreSQL")
+
+        if problems:
+            raise ValueError("Unsafe production configuration: " + "; ".join(problems))
 
 
 @lru_cache

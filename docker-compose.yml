@@ -24,11 +24,21 @@ services:
       - .env
     environment:
       DATABASE_URL: ${SUPABASE_DATABASE_URL:-postgresql+asyncpg://lifeos:lifeos@db:5432/lifeos}
+      APP_ENV: production
+      DEBUG: "false"
     ports:
-      - "8000:8000"
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    volumes:
-      - ./:/app
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   worker:
     build:
@@ -38,9 +48,10 @@ services:
       - .env
     environment:
       DATABASE_URL: ${SUPABASE_DATABASE_URL:-postgresql+asyncpg://lifeos:lifeos@db:5432/lifeos}
+      APP_ENV: production
+      DEBUG: "false"
     command: python -m app.workers.reminder_worker
-    volumes:
-      - ./:/app
+    restart: unless-stopped
 
 volumes:
   lifeos_pg:

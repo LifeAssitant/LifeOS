@@ -13,7 +13,8 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# Start the API and reminder worker against Supabase.
+# Start the production-mode API and reminder worker against Supabase.
+# Configure production APP secrets and CORS_ORIGINS in .env first.
 docker compose up -d --build api worker
 
 # Optional local Postgres rollback/source:
@@ -28,6 +29,19 @@ python -m app.workers.reminder_worker
 Use `--host 0.0.0.0` so Expo Go on your phone can reach the API over Wi‑Fi.
 
 API docs: http://localhost:8000/docs
+
+The interactive API documentation is available only in development. Production
+startup requires `DEBUG=false`, a strong `JWT_SECRET`, a valid Fernet key,
+PostgreSQL, and explicit HTTPS `CORS_ORIGINS`. Set
+`TRACE_CAPTURE_CONTENT=true` only after approving the privacy implications;
+the default is not to export chat content in traces.
+Paid checkout is disabled by default (`BILLING_ENABLED=false`); do not enable it
+until the price, credit quantity, and purchase terms are shown before checkout.
+Account creation and sign-in require an 18+ self-declaration; the apps do not
+collect a date of birth. This policy still requires qualified local legal review.
+For production, set `CORS_ORIGINS` to `["https://brainlesshuman.com","null"]`;
+the `null` origin is needed by the packaged Electron file renderer.
+Database startup removes the legacy onboarding age column and its stored values.
 
 ## Supabase + Google setup
 

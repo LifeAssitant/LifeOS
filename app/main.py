@@ -22,10 +22,14 @@ async def lifespan(_: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    settings.validate_production()
     app = FastAPI(
         title=settings.app_name,
         version="0.1.0",
         lifespan=lifespan,
+        docs_url="/docs" if settings.is_dev else None,
+        redoc_url="/redoc" if settings.is_dev else None,
+        openapi_url="/openapi.json" if settings.is_dev else None,
     )
 
     origins = list(settings.cors_origins or [])
@@ -42,7 +46,11 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     async def root() -> dict:
-        return {"app": settings.app_name, "docs": "/docs", "api": settings.api_prefix}
+        return {
+            "app": settings.app_name,
+            "docs": "/docs" if settings.is_dev else None,
+            "api": settings.api_prefix,
+        }
 
     return app
 

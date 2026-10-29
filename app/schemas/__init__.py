@@ -18,11 +18,13 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     display_name: Optional[str] = Field(default=None, max_length=120)
+    confirm_adult: Literal[True]
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+    confirm_adult: Literal[True]
 
 
 class TokenResponse(BaseModel):
@@ -37,6 +39,7 @@ class RefreshRequest(BaseModel):
 
 class GoogleAuthRequest(BaseModel):
     access_token: str = Field(min_length=20, max_length=8000)
+    confirm_adult: Literal[True]
 
 
 # --- User / settings ---
@@ -57,7 +60,6 @@ class UserPublic(ORMModel):
     google_calendar_connected: bool = False
     profession: Optional[str] = None
     professions: Optional[list[str]] = None
-    age: Optional[int] = None
     busy_level: Optional[int] = None
     use_cases: Optional[list[str]] = None
     profile_completed: bool = False
@@ -67,7 +69,6 @@ class ProfileSurvey(BaseModel):
     """Audience questions answered once, between onboarding and the walkthrough."""
 
     professions: Optional[list[str]] = Field(default=None, max_length=12)
-    age: Optional[int] = Field(default=None, ge=5, le=120)
     busy_level: Optional[int] = Field(default=None, ge=1, le=5)
     use_cases: Optional[list[str]] = Field(default=None, max_length=12)
 

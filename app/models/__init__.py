@@ -81,6 +81,9 @@ class User(Base, TimestampMixin):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
     password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     display_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    adult_confirmed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     supabase_user_id: Mapped[Optional[str]] = mapped_column(
         String(64), unique=True, nullable=True, index=True
     )
@@ -91,7 +94,6 @@ class User(Base, TimestampMixin):
     # profession keeps the primary pick so it stays easy to filter on; professions holds all of them.
     profession: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     professions: Mapped[Optional[list]] = mapped_column(JSONType, nullable=True)
-    age: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     busy_level: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     use_cases: Mapped[Optional[list]] = mapped_column(JSONType, nullable=True)
     profile_completed_at: Mapped[Optional[datetime]] = mapped_column(
@@ -242,6 +244,13 @@ class NotificationLog(Base, TimestampMixin):
     meta: Mapped[Optional[dict]] = mapped_column(JSONType, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="notifications")
+
+
+class ProcessedStripeEvent(Base):
+    __tablename__ = "processed_stripe_events"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
 
 
 class UserGardenItem(Base, TimestampMixin):

@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings, get_settings
 from app.core.encryption import get_secret_box
 from app.core.security import get_current_user
 from app.database import get_db
@@ -55,3 +56,12 @@ async def update_ai(
 @router.get("/credits", response_model=CreditsResponse)
 async def credits(user: User = Depends(get_current_user)) -> CreditsResponse:
     return CreditsResponse(credit_balance=user.credit_balance, ai_mode=user.ai_mode)
+
+
+@router.delete("", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_me(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    await UserService(db, get_secret_box()).delete_account(user, settings)

@@ -88,6 +88,7 @@ class User(Base, TimestampMixin):
         String(64), unique=True, nullable=True, index=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    auth_token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # Audience profile — answered once, right after onboarding.
@@ -107,6 +108,25 @@ class User(Base, TimestampMixin):
     )
     encrypted_gemini_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     credit_balance: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    weekly_subscription_credits: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    subscription_next_credit_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    subscription_current_period_end: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    razorpay_subscription_id: Mapped[Optional[str]] = mapped_column(
+        String(100), unique=True, nullable=True, index=True
+    )
+    razorpay_subscription_checkout_url: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    subscription_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    subscription_cancel_at_period_end: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     # Monotonic count of task completions (never decreases on reopen).
     tasks_completed_lifetime: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
@@ -246,11 +266,28 @@ class NotificationLog(Base, TimestampMixin):
     user: Mapped["User"] = relationship(back_populates="notifications")
 
 
-class ProcessedStripeEvent(Base):
-    __tablename__ = "processed_stripe_events"
+class ProcessedRazorpayEvent(Base):
+    __tablename__ = "processed_razorpay_events"
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class UserGardenItem(Base, TimestampMixin):

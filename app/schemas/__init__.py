@@ -37,6 +37,19 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=32, max_length=256)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class PasswordResetMessage(BaseModel):
+    message: str
+
+
 class GoogleAuthRequest(BaseModel):
     access_token: str = Field(min_length=20, max_length=8000)
     confirm_adult: Literal[True]
@@ -253,6 +266,24 @@ class TranscribeResponse(BaseModel):
 
 class CheckoutResponse(BaseModel):
     checkout_url: str
+
+
+class BillingOptions(BaseModel):
+    enabled: bool
+    monthly_price_paise: Optional[int]
+    weekly_credits: Optional[int]
+    topup_amount_paise: Optional[int]
+    topup_credits: Optional[int]
+
+
+class BillingStatus(BaseModel):
+    credit_balance: int
+    weekly_subscription_credits: int
+    subscription_status: Optional[str]
+    subscription_next_credit_at: Optional[datetime]
+    subscription_current_period_end: Optional[datetime]
+    subscription_cancel_at_period_end: bool = False
+    billing_enabled: bool
 
 
 class CreditsResponse(BaseModel):

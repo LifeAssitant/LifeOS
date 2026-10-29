@@ -80,8 +80,10 @@ class AuthService:
         self.db.add(user)
         await self.db.commit()
         await self.db.refresh(user)
-        return user, create_access_token(user.id, self.settings), create_refresh_token(
-            user.id, self.settings
+        return user, create_access_token(
+            user.id, self.settings, user.auth_token_version
+        ), create_refresh_token(
+            user.id, self.settings, user.auth_token_version
         )
 
     async def login(self, payload: LoginRequest) -> tuple[User, str, str]:
@@ -101,8 +103,10 @@ class AuthService:
         if user.adult_confirmed_at is None:
             user.adult_confirmed_at = _utcnow()
             await self.db.commit()
-        return user, create_access_token(user.id, self.settings), create_refresh_token(
-            user.id, self.settings
+        return user, create_access_token(
+            user.id, self.settings, user.auth_token_version
+        ), create_refresh_token(
+            user.id, self.settings, user.auth_token_version
         )
 
     async def login_with_google(self, access_token: str) -> tuple[User, str, str]:
@@ -155,8 +159,10 @@ class AuthService:
 
         await self.db.commit()
         await self.db.refresh(user)
-        return user, create_access_token(user.id, self.settings), create_refresh_token(
-            user.id, self.settings
+        return user, create_access_token(
+            user.id, self.settings, user.auth_token_version
+        ), create_refresh_token(
+            user.id, self.settings, user.auth_token_version
         )
 
     async def refresh(self, refresh_token: str) -> tuple[str, str]:
@@ -172,13 +178,17 @@ class AuthService:
         user = result.scalar_one_or_none()
         if user is None or not user.is_active:
             raise HTTPException(status_code=401, detail="User not found")
+        if payload.get("ver", 0) != user.auth_token_version:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
         if user.adult_confirmed_at is None:
             raise HTTPException(
                 status_code=403,
                 detail="Sign in again and confirm that you are 18 or older",
             )
-        return create_access_token(user.id, self.settings), create_refresh_token(
-            user.id, self.settings
+        return create_access_token(
+            user.id, self.settings, user.auth_token_version
+        ), create_refresh_token(
+            user.id, self.settings, user.auth_token_version
         )
 
 
@@ -252,6 +262,38 @@ class UserService:
         await self.db.commit()
         await self.db.refresh(user)
         return user
+
+    async def delete_account(self, user: User, settings: Settings) -> None:
+        if user.supabase_user_id:
+            if not settings.supabase_url or not settings.supabase_service_role_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Account deletion for this sign-in provider is not configured. Contact support.",
+                )
+            endpoint = (
+                f"{settings.supabase_url.rstrip('/')}/auth/v1/admin/users/"
+                f"{user.supabase_user_id}"
+            )
+            headers = {
+                "apikey": settings.supabase_service_role_key,
+                "Authorization": f"Bearer {settings.supabase_service_role_key}",
+            }
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    response = await client.delete(endpoint, headers=headers)
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Could not delete the linked sign-in account. Your LifeOS data was not deleted; please retry.",
+                ) from exc
+            if response.status_code not in (200, 204, 404):
+                raise HTTPException(
+                    status_code=502,
+                    detail="The linked sign-in provider did not confirm account deletion. Your LifeOS data was not deleted.",
+                )
+
+        await self.db.delete(user)
+        await self.db.commit()
 
     async def save_profile_survey(self, user: User, payload: ProfileSurvey) -> User:
         data = payload.model_dump(exclude_unset=True)
@@ -353,7 +395,15 @@ class TaskService:
         return task
 
     async def update(self, user: User, task_id: UUID, payload: TaskUpdate) -> Task:
-        task = await self.get(user, task_id)
+        result = await self.db.execute(
+            select(Task)
+            .where(Task.id == task_id, Task.user_id == user.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        task = result.scalar_one_or_none()
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
         data = payload.model_dump(exclude_unset=True)
         newly_completed = (
             "status" in data
@@ -371,6 +421,13 @@ class TaskService:
                 task.due_at, None, user.remind_before_minutes
             )
         if newly_completed:
+            result = await self.db.execute(
+                select(User)
+                .where(User.id == user.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            user = result.scalar_one()
             settings = get_settings()
             interval = max(1, settings.task_credit_interval)
             reward = max(0, settings.task_credit_reward)

@@ -36,7 +36,7 @@ async def garden_catalog(
     owned = await service.owned_skus(user.id)
     lifetime, interval, until_next = _credit_progress(user, settings)
     return GardenCatalogResponse(
-        credit_balance=user.credit_balance,
+        credit_balance=user.credit_balance - user.weekly_subscription_credits,
         items=[GardenItemOut(**row) for row in service.catalog_with_owned(owned)],
         tasks_completed_lifetime=lifetime,
         task_credit_interval=interval,
@@ -64,7 +64,7 @@ async def garden_purchase(
     await service.purchase(user, body.sku)
     owned = await service.owned_skus(user.id)
     return GardenPurchaseResponse(
-        credit_balance=user.credit_balance,
+        credit_balance=user.credit_balance - user.weekly_subscription_credits,
         owned_skus=sorted(owned),
         item=GardenItemOut(**service.describe_owned([body.sku])[0]),
     )

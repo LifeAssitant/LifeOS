@@ -14,7 +14,7 @@ A calm, cute AI companion that turns overwhelm into a clear calendar of tasks an
 | Shared logic | Small shared package (TypeScript types + API client) later; start duplicated if faster | Keep early velocity, extract when screens stabilize |
 | AI | **Google Gemini** | Chat → structured task/event extraction |
 | Auth | Email/password JWT + **Google via Supabase Auth** | Dual path; Calendar connect is separate OAuth |
-| Billing | Stripe for hosted AI credits; Settings toggle for **BYOK** (user Gemini key stored encrypted) | Paid API vs own-key |
+| Billing | Razorpay monthly subscription and one-time AI-credit top-ups for web/desktop; Settings toggle for **BYOK** (user Gemini key stored encrypted) | Hosted AI credits vs own-key |
 
 **Not choosing Django** — admin/ORM are nice, but FastAPI fits streaming chat, lightweight mobile APIs, and reminder workers better for this product.
 
@@ -99,7 +99,7 @@ flowchart LR
 
 ### Phase 4 — Hosted vs BYOK + polish
 
-- Settings: toggle LifeOS API (paid credits via Stripe) vs paste own Gemini key.
+- Settings: toggle LifeOS hosted AI credits vs paste own Gemini key.
 - Encrypt BYOK keys; never log raw keys; rate-limit hosted mode.
 - Onboarding: 3 cute screens (talk → calendar → reminders).
 - Harden auth, errors, offline toast (“We’ll sync when you’re back”).

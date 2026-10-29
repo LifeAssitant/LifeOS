@@ -363,6 +363,7 @@ class GeminiChatService:
         self.user_service = user_service
         self.tasks = TaskService(db)
         self.events = EventService(db)
+        self._charged_subscription_credits = 0
 
     async def history(self, user: User, limit: int = 40) -> list[ChatMessage]:
         result = await self.db.execute(
@@ -435,20 +436,62 @@ class GeminiChatService:
         if user.ai_mode != AIMode.hosted:
             return
         enforce_hosted_chat_limit(user.id)
+        self._charged_subscription_credits = 0
+        result = await self.db.execute(
+            select(User)
+            .where(User.id == user.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        user = result.scalar_one()
+        if user.ai_mode != AIMode.hosted:
+            return
+        from app.services.billing import BillingService
+
+        await BillingService(self.db, self.settings)._refresh_subscription_credits(user)
         cost = self.settings.hosted_chat_credit_cost
         if user.credit_balance < cost:
             raise HTTPException(
                 status_code=402,
                 detail="Not enough AI credits. Complete tasks to earn credits or switch to your own Gemini key.",
             )
+        self._charged_subscription_credits = min(
+            user.weekly_subscription_credits, cost
+        )
+        user.weekly_subscription_credits -= self._charged_subscription_credits
         user.credit_balance -= cost
         await self.db.commit()
         await self.db.refresh(user)
 
     async def _refund_hosted_credit(self, user: User) -> None:
         if user.ai_mode == AIMode.hosted:
+            result = await self.db.execute(
+                select(User)
+                .where(User.id == user.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            user = result.scalar_one()
             user.credit_balance += self.settings.hosted_chat_credit_cost
+            next_credit = user.subscription_next_credit_at
+            if next_credit and next_credit.tzinfo is None:
+                next_credit = next_credit.replace(tzinfo=timezone.utc)
+            if (
+                user.subscription_status in {"authenticated", "active"}
+                and next_credit is not None
+                and next_credit > datetime.now(timezone.utc)
+            ):
+                restore = min(
+                    self._charged_subscription_credits,
+                    max(
+                        0,
+                        self.settings.subscription_weekly_credits
+                        - user.weekly_subscription_credits,
+                    ),
+                )
+                user.weekly_subscription_credits += restore
             await self.db.commit()
+            self._charged_subscription_credits = 0
 
     def _memory_lines(self, user: User) -> list[str]:
         raw = getattr(user, "ai_memory", None) or []

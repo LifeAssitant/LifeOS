@@ -181,11 +181,21 @@ class GardenService:
         if item is None:
             raise HTTPException(status_code=404, detail="That garden item is not in the store.")
 
+        result = await self.db.execute(
+            select(User)
+            .where(User.id == user.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        user = result.scalar_one()
         owned = await self.owned_skus(user.id)
         if sku in owned:
             raise HTTPException(status_code=409, detail="You already own this garden item.")
 
-        if user.credit_balance < item.credit_cost:
+        non_subscription_credits = (
+            user.credit_balance - user.weekly_subscription_credits
+        )
+        if non_subscription_credits < item.credit_cost:
             raise HTTPException(
                 status_code=402,
                 detail="Not enough credits. Buy more credits, then come back to the garden store.",

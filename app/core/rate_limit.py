@@ -11,9 +11,15 @@ from fastapi import HTTPException
 
 
 class RateLimiter:
-    def __init__(self, max_calls: int = 30, window_seconds: int = 60) -> None:
+    def __init__(
+        self,
+        max_calls: int = 30,
+        window_seconds: int = 60,
+        message: str = "Too many AI requests. Slow down a moment.",
+    ) -> None:
         self.max_calls = max_calls
         self.window_seconds = window_seconds
+        self.message = message
         self._hits: dict[str, deque[float]] = defaultdict(deque)
         self._lock = Lock()
 
@@ -26,7 +32,7 @@ class RateLimiter:
             if len(bucket) >= self.max_calls:
                 raise HTTPException(
                     status_code=429,
-                    detail="Too many AI requests. Slow down a moment.",
+                    detail=self.message,
                 )
             bucket.append(now)
 

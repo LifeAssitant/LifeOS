@@ -23,10 +23,27 @@ def test_production_configuration_accepts_explicit_secure_values():
         jwt_secret="a-secure-random-secret-with-at-least-32-characters",
         fernet_key=Fernet.generate_key().decode(),
         cors_origins=["https://brainlesshuman.com"],
+        supabase_url="https://project.supabase.co",
+        supabase_service_role_key="server-only-service-role-key",
         database_url="postgresql+asyncpg://user:password@db.example.com/lifeos",
     )
 
     settings.validate_production()
+
+
+def test_production_billing_requires_complete_razorpay_configuration():
+    settings = Settings(
+        app_env="production",
+        debug=False,
+        jwt_secret="a-secure-random-secret-with-at-least-32-characters",
+        fernet_key=Fernet.generate_key().decode(),
+        cors_origins=["https://brainlesshuman.com"],
+        database_url="******db.example.com/lifeos",
+        billing_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="Razorpay credentials"):
+        settings.validate_production()
 
 
 @pytest.mark.parametrize(
@@ -40,6 +57,13 @@ def test_production_configuration_accepts_explicit_secure_values():
         ({"cors_origins": ["http://localhost:5173"]}, "HTTPS"),
         ({"cors_origins": ["null"]}, "HTTPS website origin"),
         ({"database_url": "sqlite+aiosqlite:///lifeos.db"}, "PostgreSQL"),
+        (
+            {
+                "supabase_url": "https://project.supabase.co",
+                "supabase_service_role_key": "",
+            },
+            "SUPABASE_SERVICE_ROLE_KEY",
+        ),
     ],
 )
 def test_production_configuration_reports_individual_unsafe_values(
@@ -51,6 +75,8 @@ def test_production_configuration_reports_individual_unsafe_values(
         "jwt_secret": "a-secure-random-secret-with-at-least-32-characters",
         "fernet_key": Fernet.generate_key().decode(),
         "cors_origins": ["https://brainlesshuman.com"],
+        "supabase_url": "https://project.supabase.co",
+        "supabase_service_role_key": "server-only-service-role-key",
         "database_url": "postgresql+asyncpg://user:password@db.example.com/lifeos",
     }
     values.update(overrides)
@@ -61,16 +87,18 @@ def test_production_configuration_reports_individual_unsafe_values(
 
 
 def test_production_configuration_allows_the_electron_file_origin():
-        settings = Settings(
-            app_env="production",
-            debug=False,
-            jwt_secret="a-secure-random-secret-with-at-least-32-characters",
-            fernet_key=Fernet.generate_key().decode(),
-            cors_origins=["https://brainlesshuman.com", "null"],
-            database_url="postgresql://user:password@db.example.com/lifeos",
-        )
+    settings = Settings(
+        app_env="production",
+        debug=False,
+        jwt_secret="a-secure-random-secret-with-at-least-32-characters",
+        fernet_key=Fernet.generate_key().decode(),
+        cors_origins=["https://brainlesshuman.com", "null"],
+        supabase_url="https://project.supabase.co",
+        supabase_service_role_key="server-only-service-role-key",
+        database_url="postgresql://user:password@db.example.com/lifeos",
+    )
 
-        settings.validate_production()
+    settings.validate_production()
 
 
 def test_production_disables_public_api_documentation(monkeypatch):
@@ -80,6 +108,8 @@ def test_production_disables_public_api_documentation(monkeypatch):
         jwt_secret="a-secure-random-secret-with-at-least-32-characters",
         fernet_key=Fernet.generate_key().decode(),
         cors_origins=["https://brainlesshuman.com"],
+        supabase_url="https://project.supabase.co",
+        supabase_service_role_key="server-only-service-role-key",
         database_url="postgresql://user:password@db.example.com/lifeos",
     )
     monkeypatch.setattr("app.main.get_settings", lambda: settings)

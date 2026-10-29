@@ -11,6 +11,7 @@ from app.services.lifecycle import (
     user_to_public,
 )
 from app.services.notifications import NotificationService, ReminderScanner
+from app.services.password_reset import PasswordResetService
 
 __all__ = [
     "AuthService",
@@ -20,6 +21,7 @@ __all__ = [
     "GeminiChatService",
     "GoogleCalendarService",
     "NotificationService",
+    "PasswordResetService",
     "ReminderScanner",
     "TaskService",
     "TodayService",

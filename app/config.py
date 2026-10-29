@@ -39,9 +39,18 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 30
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_use_ssl: bool = False
+    smtp_starttls: bool = True
+    public_app_url: str = "https://brainlesshuman.com"
 
     supabase_url: str = ""
     supabase_jwt_secret: str = ""
+    supabase_service_role_key: str = ""
 
     google_client_id: str = ""
     google_client_secret: str = ""
@@ -60,13 +69,16 @@ class Settings(BaseSettings):
     task_credit_interval: int = 50
     task_credit_reward: int = 1
 
-    stripe_secret_key: str = ""
-    stripe_webhook_secret: str = ""
-    stripe_price_id_credits: str = ""
     billing_enabled: bool = False
-    stripe_success_url: str = "http://localhost:5173/settings?credits=success"
-    stripe_cancel_url: str = "http://localhost:5173/settings?credits=cancel"
-    credits_per_purchase: int = 100
+    razorpay_key_id: str = ""
+    razorpay_key_secret: str = ""
+    razorpay_webhook_secret: str = ""
+    razorpay_monthly_plan_id: str = ""
+    razorpay_monthly_price_paise: int = 0
+    subscription_weekly_credits: int = 0
+    subscription_total_cycles: int = 120
+    razorpay_topup_amount_paise: int = 0
+    razorpay_topup_credits: int = 0
 
     expo_access_token: str = ""
 
@@ -124,9 +136,43 @@ class Settings(BaseSettings):
             problems.append("Production CORS_ORIGINS must use HTTPS")
         if not self.database_url.startswith(("postgresql://", "postgresql+asyncpg://")):
             problems.append("DATABASE_URL must use PostgreSQL")
+        if self.supabase_url and not self.supabase_service_role_key:
+            problems.append(
+                "SUPABASE_SERVICE_ROLE_KEY is required when Supabase authentication is enabled"
+            )
+        if self.billing_enabled and not self.razorpay_billing_ready:
+            problems.append(
+                "Razorpay credentials, plan, prices, and credit quantities are required when billing is enabled"
+            )
 
         if problems:
             raise ValueError("Unsafe production configuration: " + "; ".join(problems))
+
+    @property
+    def razorpay_billing_ready(self) -> bool:
+        return all(
+            (
+                self.razorpay_key_id,
+                self.razorpay_key_secret,
+                self.razorpay_webhook_secret,
+                self.razorpay_monthly_plan_id,
+                self.razorpay_monthly_price_paise > 0,
+                self.subscription_weekly_credits > 0,
+                self.razorpay_topup_amount_paise > 0,
+                self.razorpay_topup_credits > 0,
+                self.subscription_total_cycles > 0,
+            )
+        )
+
+    @property
+    def password_reset_ready(self) -> bool:
+        return bool(
+            self.smtp_host
+            and self.smtp_from_email
+            and self.public_app_url.startswith("https://")
+            and bool(self.smtp_username) == bool(self.smtp_password)
+            and (self.smtp_use_ssl or self.smtp_starttls)
+        )
 
 
 @lru_cache

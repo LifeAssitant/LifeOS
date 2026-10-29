@@ -51,6 +51,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 _SCHEMA_PATCHES = [
     "ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_token_version INTEGER DEFAULT 0 NOT NULL",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS supabase_user_id VARCHAR(64)",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS adult_confirmed_at TIMESTAMPTZ",
     "ALTER TABLE users DROP COLUMN IF EXISTS age",
@@ -65,6 +66,20 @@ _SCHEMA_PATCHES = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS tasks_completed_lifetime INTEGER DEFAULT 0 NOT NULL",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_check_in_notified_at TIMESTAMPTZ",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_memory JSONB",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS weekly_subscription_credits INTEGER DEFAULT 0 NOT NULL",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_next_credit_at TIMESTAMPTZ",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_current_period_end TIMESTAMPTZ",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS razorpay_subscription_id VARCHAR(100)",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS razorpay_subscription_checkout_url VARCHAR(500)",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(32)",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_cancel_at_period_end BOOLEAN DEFAULT FALSE NOT NULL",
+    """
+    DO $$ BEGIN
+      CREATE UNIQUE INDEX IF NOT EXISTS ix_users_razorpay_subscription_id
+        ON users (razorpay_subscription_id)
+        WHERE razorpay_subscription_id IS NOT NULL;
+    END $$;
+    """,
     """
     DO $$ BEGIN
       CREATE UNIQUE INDEX IF NOT EXISTS ix_users_supabase_user_id

@@ -48,21 +48,27 @@ def create_token(
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
-def create_access_token(user_id: UUID, settings: Settings) -> str:
+def create_access_token(
+    user_id: UUID, settings: Settings, token_version: int = 0
+) -> str:
     return create_token(
         str(user_id),
         token_type="access",
         expires_delta=timedelta(minutes=settings.access_token_expire_minutes),
         settings=settings,
+        extra={"ver": token_version},
     )
 
 
-def create_refresh_token(user_id: UUID, settings: Settings) -> str:
+def create_refresh_token(
+    user_id: UUID, settings: Settings, token_version: int = 0
+) -> str:
     return create_token(
         str(user_id),
         token_type="refresh",
         expires_delta=timedelta(days=settings.refresh_token_expire_days),
         settings=settings,
+        extra={"ver": token_version},
     )
 
 
@@ -98,6 +104,8 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="User inactive or not found")
+    if payload.get("ver", 0) != user.auth_token_version:
+        raise HTTPException(status_code=401, detail="Session expired; sign in again")
     if user.adult_confirmed_at is None:
         raise HTTPException(
             status_code=403,

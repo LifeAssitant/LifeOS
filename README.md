@@ -7,7 +7,7 @@ Calm AI LifeManager API — FastAPI + Supabase Postgres + Gemini.
 ```bash
 cp .env.example .env
 # Fill SUPABASE_DATABASE_URL (Session Pooler for Docker), JWT_SECRET, FERNET_KEY,
-# SUPABASE_JWT_SECRET, and optionally Google / Gemini / Stripe keys
+# SUPABASE_JWT_SECRET, and optionally Google / Gemini / Razorpay keys
 
 python -m venv .venv
 # Windows: .venv\Scripts\activate
@@ -35,13 +35,33 @@ startup requires `DEBUG=false`, a strong `JWT_SECRET`, a valid Fernet key,
 PostgreSQL, and explicit HTTPS `CORS_ORIGINS`. Set
 `TRACE_CAPTURE_CONTENT=true` only after approving the privacy implications;
 the default is not to export chat content in traces.
-Paid checkout is disabled by default (`BILLING_ENABLED=false`); do not enable it
-until the price, credit quantity, and purchase terms are shown before checkout.
+Paid checkout is disabled by default (`BILLING_ENABLED=false`). Web and desktop
+checkout use Razorpay monthly subscriptions and one-time credit top-ups. Configure
+the dashboard plan ID, INR prices, credit quantities, API credentials, and webhook
+secret before enabling checkout. Subscription credits refresh weekly and do not
+roll over; paid top-up credits do not expire. Do not enable billing until those
+terms are final and displayed in the clients.
+Configure the Razorpay webhook at
+`https://api.brainlesshuman.com/api/v1/billing/webhook` for
+`payment_link.paid`, `subscription.authenticated`, `subscription.activated`,
+`subscription.charged`, `subscription.cancelled`, and `subscription.halted`.
+Also enable `subscription.pending` to process failed-renewal state changes.
+Payments are exposed in the Windows desktop client; Android in-app checkout
+remains disabled.
+Email/password recovery is implemented through the static landing page. Configure
+the SMTP settings in `.env` (`SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM_EMAIL`, and
+provider credentials where required) before launch. Reset links expire after
+30 minutes, are single-use, and password changes invalidate existing LifeOS
+sessions. Requests have a per-account cooldown and a basic per-process IP limit;
+configure equivalent edge/provider rate limits for multi-worker deployments.
 Account creation and sign-in require an 18+ self-declaration; the apps do not
 collect a date of birth. This policy still requires qualified local legal review.
 For production, set `CORS_ORIGINS` to `["https://brainlesshuman.com","null"]`;
 the `null` origin is needed by the packaged Electron file renderer.
 Database startup removes the legacy onboarding age column and its stored values.
+Users can delete their LifeOS account from app settings. Configure
+`SUPABASE_SERVICE_ROLE_KEY` as a backend-only secret to also remove linked
+Supabase Auth identities; failed provider deletion leaves LifeOS data intact.
 
 ## Supabase + Google setup
 

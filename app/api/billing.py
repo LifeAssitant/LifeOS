@@ -9,30 +9,66 @@ from app.config import Settings, get_settings
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models import NotificationChannel, NotificationLog, User
-from app.schemas import CheckoutResponse, NotificationOut
+from app.schemas import BillingOptions, BillingStatus, CheckoutResponse, NotificationOut
 from app.services import BillingService
 
 router = APIRouter(tags=["billing", "notifications"])
 
 
-@router.post("/billing/checkout", response_model=CheckoutResponse)
-async def create_checkout(
+@router.get("/billing/options", response_model=BillingOptions)
+async def billing_options(
+    settings: Settings = Depends(get_settings),
+) -> BillingOptions:
+    return BillingOptions(**BillingService.options(settings))
+
+
+@router.get("/billing/status", response_model=BillingStatus)
+async def billing_status(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> BillingStatus:
+    return await BillingService(db, settings).status(user)
+
+
+@router.post("/billing/subscription/checkout", response_model=CheckoutResponse)
+async def create_subscription_checkout(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> CheckoutResponse:
-    return await BillingService(db, settings).create_checkout(user)
+    return CheckoutResponse(
+        **await BillingService(db, settings).create_subscription_checkout(user)
+    )
+
+
+@router.post("/billing/subscription/cancel")
+async def cancel_subscription(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    return await BillingService(db, settings).cancel_subscription(user)
+
+
+@router.post("/billing/topup/checkout", response_model=CheckoutResponse)
+async def create_topup_checkout(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> CheckoutResponse:
+    return CheckoutResponse(**await BillingService(db, settings).create_topup_checkout(user))
 
 
 @router.post("/billing/webhook")
-async def stripe_webhook(
+async def razorpay_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    stripe_signature: str = Header(default="", alias="Stripe-Signature"),
+    razorpay_signature: str = Header(default="", alias="X-Razorpay-Signature"),
 ) -> dict:
     payload = await request.body()
-    return await BillingService(db, settings).handle_webhook(payload, stripe_signature)
+    return await BillingService(db, settings).handle_webhook(payload, razorpay_signature)
 
 
 @router.get("/notifications", response_model=List[NotificationOut])

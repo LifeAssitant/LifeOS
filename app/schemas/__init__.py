@@ -268,8 +268,42 @@ class CheckoutResponse(BaseModel):
     checkout_url: str
 
 
+class RazorpayOrderResponse(BaseModel):
+    order_id: str
+    amount: int
+    currency: str
+    key_id: str
+    name: str
+    description: str
+
+
+class RazorpayPaymentVerification(BaseModel):
+    razorpay_order_id: Optional[str] = None
+    razorpay_payment_id: Optional[str] = None
+    razorpay_signature: Optional[str] = None
+
+
+class RazorpayPaymentVerificationResponse(BaseModel):
+    verified: bool
+    credits_added: int
+
+
+class GooglePlayBillingOptions(BaseModel):
+    enabled: bool
+    product_id: Optional[str] = None
+    credits: Optional[int] = None
+    obfuscated_account_id: Optional[str] = None
+
+
+class GooglePlayPurchaseVerification(BaseModel):
+    product_id: str = Field(min_length=1, max_length=150)
+    purchase_token: str = Field(min_length=1, max_length=4096)
+
+
 class BillingOptions(BaseModel):
     enabled: bool
+    subscription_enabled: bool
+    topup_enabled: bool
     monthly_price_paise: Optional[int]
     weekly_credits: Optional[int]
     topup_amount_paise: Optional[int]

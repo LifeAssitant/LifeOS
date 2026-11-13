@@ -9,8 +9,18 @@ from app.config import Settings, get_settings
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models import NotificationChannel, NotificationLog, User
-from app.schemas import BillingOptions, BillingStatus, CheckoutResponse, NotificationOut
-from app.services import BillingService
+from app.schemas import (
+    BillingOptions,
+    BillingStatus,
+    CheckoutResponse,
+    GooglePlayBillingOptions,
+    GooglePlayPurchaseVerification,
+    NotificationOut,
+    RazorpayOrderResponse,
+    RazorpayPaymentVerification,
+    RazorpayPaymentVerificationResponse,
+)
+from app.services import BillingService, GooglePlayBillingService
 
 router = APIRouter(tags=["billing", "notifications"])
 
@@ -20,6 +30,34 @@ async def billing_options(
     settings: Settings = Depends(get_settings),
 ) -> BillingOptions:
     return BillingOptions(**BillingService.options(settings))
+
+
+@router.get(
+    "/billing/google-play/options",
+    response_model=GooglePlayBillingOptions,
+)
+async def google_play_billing_options(
+    user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> GooglePlayBillingOptions:
+    return GooglePlayBillingOptions(
+        **GooglePlayBillingService.options(settings, user)
+    )
+
+
+@router.post(
+    "/billing/google-play/topup/verify",
+    response_model=RazorpayPaymentVerificationResponse,
+)
+async def verify_google_play_topup(
+    body: GooglePlayPurchaseVerification,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> RazorpayPaymentVerificationResponse:
+    return RazorpayPaymentVerificationResponse(
+        **await GooglePlayBillingService(db, settings).verify_topup(user, body)
+    )
 
 
 @router.get("/billing/status", response_model=BillingStatus)
@@ -58,6 +96,32 @@ async def create_topup_checkout(
     settings: Settings = Depends(get_settings),
 ) -> CheckoutResponse:
     return CheckoutResponse(**await BillingService(db, settings).create_topup_checkout(user))
+
+
+@router.post("/billing/topup/order", response_model=RazorpayOrderResponse)
+async def create_topup_order(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> RazorpayOrderResponse:
+    return RazorpayOrderResponse(
+        **await BillingService(db, settings).create_topup_order(user)
+    )
+
+
+@router.post(
+    "/billing/topup/verify",
+    response_model=RazorpayPaymentVerificationResponse,
+)
+async def verify_topup_payment(
+    body: RazorpayPaymentVerification,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> RazorpayPaymentVerificationResponse:
+    return RazorpayPaymentVerificationResponse(
+        **await BillingService(db, settings).verify_topup_payment(user, body)
+    )
 
 
 @router.post("/billing/webhook")

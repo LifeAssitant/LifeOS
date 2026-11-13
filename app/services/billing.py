@@ -2,7 +2,8 @@ import hashlib
 import hmac
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from uuid import UUID
+from urllib.parse import quote
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import HTTPException
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.models import ProcessedRazorpayEvent, User
+from app.schemas import RazorpayPaymentVerification
 
 RAZORPAY_API = "https://api.razorpay.com/v1"
 WEEK = timedelta(days=7)
@@ -27,6 +29,21 @@ class BillingService:
         if not self.settings.billing_enabled or not self.settings.razorpay_billing_ready:
             raise HTTPException(status_code=503, detail="Paid plans are not available")
 
+    def _ensure_checkout(self) -> None:
+        if not self.settings.billing_enabled or not all(
+            (
+                self.settings.razorpay_key_id,
+                self.settings.razorpay_key_secret,
+                self.settings.razorpay_topup_credits > 0,
+            )
+        ):
+            raise HTTPException(status_code=503, detail="Credit top-ups are not available")
+        if self.settings.razorpay_topup_amount_paise < 100:
+            raise HTTPException(
+                status_code=400,
+                detail="Payment amount must be at least 100 paise",
+            )
+
     async def _request(
         self, method: str, path: str, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -40,10 +57,20 @@ class BillingService:
                 )
                 response.raise_for_status()
                 result = response.json()
+        except httpx.HTTPStatusError as exc:
+            status_code = 401 if exc.response.status_code in {401, 403} else 500
+            detail = (
+                "Razorpay credentials were rejected"
+                if status_code == 401
+                else "Razorpay could not complete the billing request"
+            )
+            raise HTTPException(status_code=status_code, detail=detail) from exc
         except httpx.HTTPError as exc:
             raise HTTPException(
                 status_code=502, detail="Razorpay could not complete the billing request"
             ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail="Invalid response from Razorpay") from exc
         if not isinstance(result, dict):
             raise HTTPException(status_code=502, detail="Invalid response from Razorpay")
         return result
@@ -99,6 +126,110 @@ class BillingService:
         await self.db.commit()
         return {"checkout_url": str(checkout_url)}
 
+    async def create_topup_order(self, user: User) -> dict[str, Any]:
+        self._ensure_checkout()
+        amount = self.settings.razorpay_topup_amount_paise
+        result = await self._request(
+            "POST",
+            "orders",
+            {
+                "amount": amount,
+                "currency": "INR",
+                "receipt": f"lifeos_{uuid4().hex}",
+                "notes": {
+                    "user_id": str(user.id),
+                    "credits": str(self.settings.razorpay_topup_credits),
+                    "product": "lifeos_credit_topup",
+                },
+            },
+        )
+        order_id = result.get("id")
+        if (
+            not isinstance(order_id, str)
+            or result.get("amount") != amount
+            or result.get("currency") != "INR"
+        ):
+            raise HTTPException(status_code=502, detail="Razorpay returned an invalid order")
+        return {
+            "order_id": order_id,
+            "amount": amount,
+            "currency": "INR",
+            "key_id": self.settings.razorpay_key_id,
+            "name": "LifeOS",
+            "description": f"{self.settings.razorpay_topup_credits} AI credits",
+        }
+
+    async def verify_topup_payment(
+        self, user: User, body: RazorpayPaymentVerification
+    ) -> dict[str, Any]:
+        self._ensure_checkout()
+        order_id = body.razorpay_order_id
+        payment_id = body.razorpay_payment_id
+        signature = body.razorpay_signature
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (order_id, payment_id, signature)
+        ):
+            raise HTTPException(status_code=400, detail="Missing Razorpay payment fields")
+        assert order_id is not None and payment_id is not None and signature is not None
+        expected = hmac.new(
+            self.settings.razorpay_key_secret.encode(),
+            f"{order_id}|{payment_id}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
+
+        order = await self._request("GET", f"orders/{quote(order_id, safe='')}")
+        notes = order.get("notes") or {}
+        if (
+            order.get("id") != order_id
+            or order.get("amount") != self.settings.razorpay_topup_amount_paise
+            or order.get("currency") != "INR"
+            or notes.get("user_id") != str(user.id)
+            or notes.get("product") != "lifeos_credit_topup"
+            or notes.get("credits") != str(self.settings.razorpay_topup_credits)
+        ):
+            raise HTTPException(status_code=400, detail="Razorpay order does not match this purchase")
+        billing_user = await self._user_from_notes(notes)
+
+        payment = await self._request("GET", f"payments/{quote(payment_id, safe='')}")
+        if (
+            payment.get("order_id") != order_id
+            or payment.get("amount") != self.settings.razorpay_topup_amount_paise
+            or payment.get("currency") != "INR"
+        ):
+            raise HTTPException(status_code=400, detail="Razorpay payment does not match this order")
+        if payment.get("status") != "captured" or order.get("status") != "paid":
+            raise HTTPException(status_code=409, detail="Razorpay payment has not been captured")
+
+        event_id = f"checkout_payment:{payment_id}"
+        self.db.add(
+            ProcessedRazorpayEvent(
+                id=event_id,
+                event_type="checkout.payment_verified",
+            )
+        )
+        try:
+            await self.db.flush()
+        except IntegrityError:
+            await self.db.rollback()
+            existing = await self.db.execute(
+                select(ProcessedRazorpayEvent.id).where(
+                    ProcessedRazorpayEvent.id == event_id
+                )
+            )
+            if existing.scalar_one_or_none() is not None:
+                return {"verified": True, "credits_added": 0}
+            raise
+
+        billing_user.credit_balance += self.settings.razorpay_topup_credits
+        await self.db.commit()
+        return {
+            "verified": True,
+            "credits_added": self.settings.razorpay_topup_credits,
+        }
+
     async def create_topup_checkout(self, user: User) -> dict[str, str]:
         self._ensure_billing()
         result = await self._request(
@@ -126,13 +257,26 @@ class BillingService:
 
     @staticmethod
     def options(settings: Settings) -> dict[str, Any]:
-        enabled = settings.billing_enabled and settings.razorpay_billing_ready
+        subscription_enabled = (
+            settings.billing_enabled and settings.razorpay_billing_ready
+        )
+        topup_enabled = settings.billing_enabled and settings.razorpay_checkout_ready
         return {
-            "enabled": enabled,
-            "monthly_price_paise": settings.razorpay_monthly_price_paise if enabled else None,
-            "weekly_credits": settings.subscription_weekly_credits if enabled else None,
-            "topup_amount_paise": settings.razorpay_topup_amount_paise if enabled else None,
-            "topup_credits": settings.razorpay_topup_credits if enabled else None,
+            "enabled": subscription_enabled or topup_enabled,
+            "subscription_enabled": subscription_enabled,
+            "topup_enabled": topup_enabled,
+            "monthly_price_paise": (
+                settings.razorpay_monthly_price_paise if subscription_enabled else None
+            ),
+            "weekly_credits": (
+                settings.subscription_weekly_credits if subscription_enabled else None
+            ),
+            "topup_amount_paise": (
+                settings.razorpay_topup_amount_paise if topup_enabled else None
+            ),
+            "topup_credits": (
+                settings.razorpay_topup_credits if topup_enabled else None
+            ),
         }
 
     async def status(self, user: User) -> dict[str, Any]:

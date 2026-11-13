@@ -30,6 +30,40 @@ Use `--host 0.0.0.0` so Expo Go on your phone can reach the API over Wi‑Fi.
 
 API docs: http://localhost:8000/docs
 
+## Windows host + Cloudflare Tunnel
+
+The API container publishes only to the Windows host's loopback interface on
+`API_PORT` (default `8001`). In the Cloudflare dashboard, add a **Published
+application** route to the existing tunnel:
+
+| Setting | Value |
+|---------|-------|
+| Hostname | `lifeos-api.brainlesshuman.com` |
+| Service | `http://127.0.0.1:8001` |
+
+If you change `API_PORT` in `.env`, change the route's service port to match.
+Keep the API bound to `127.0.0.1`; do not expose its port to the LAN or internet.
+Cloudflare Tunnel reaches the loopback port through the Windows `cloudflared`
+service, so no router port forwarding is required.
+
+On this Windows PC, confirm the `cloudflared` service is set to **Automatic**.
+Start the API and worker once with the Compose command above. Both containers
+have a `unless-stopped` restart policy and will start again when Docker starts.
+In Docker Desktop, enable **Start Docker Desktop when you sign in to your
+computer**. This starts the stack after Windows sign-in; Docker Desktop is not
+running before a user signs in.
+
+For future products, add each container and its loopback-only host port to the
+central Compose deployment, then add a corresponding Published application
+route in Cloudflare. Keep this table as the hostname-to-port inventory:
+
+| Product | Hostname | Compose service | Host port |
+|---------|----------|-----------------|-----------|
+| LifeOS | `lifeos-api.brainlesshuman.com` | `api` | `127.0.0.1:8001` |
+
+Use the one-level `lifeos-api.brainlesshuman.com` hostname for HTTPS clients.
+The former `api.lifeos.brainlesshuman.com` route is not used.
+
 The interactive API documentation is available only in development. Production
 startup requires `DEBUG=false`, a strong `JWT_SECRET`, a valid Fernet key,
 PostgreSQL, and explicit HTTPS `CORS_ORIGINS`. Set
@@ -42,12 +76,20 @@ secret before enabling checkout. Subscription credits refresh weekly and do not
 roll over; paid top-up credits do not expire. Do not enable billing until those
 terms are final and displayed in the clients.
 Configure the Razorpay webhook at
-`https://api.brainlesshuman.com/api/v1/billing/webhook` for
+`https://lifeos-api.brainlesshuman.com/api/v1/billing/webhook` for
 `payment_link.paid`, `subscription.authenticated`, `subscription.activated`,
 `subscription.charged`, `subscription.cancelled`, and `subscription.halted`.
 Also enable `subscription.pending` to process failed-renewal state changes.
-Payments are exposed in the Windows desktop client; Android in-app checkout
-remains disabled.
+Web and Windows desktop purchases use Razorpay. Android offers one-time credit
+top-ups through Google Play Billing; mobile subscriptions are not offered.
+Before enabling Android top-ups, create and activate the managed product in Play
+Console, grant the configured service account Android Publisher API access, and
+set `GOOGLE_PLAY_BILLING_ENABLED`, `GOOGLE_PLAY_PACKAGE_NAME`,
+`GOOGLE_PLAY_TOPUP_PRODUCT_ID`, `GOOGLE_PLAY_TOPUP_CREDITS`,
+`GOOGLE_PLAY_SERVICE_ACCOUNT_EMAIL`, and
+`GOOGLE_PLAY_SERVICE_ACCOUNT_PRIVATE_KEY` in the backend secret store. The
+package name must match the Android release and the product ID must match Play
+Console. Test with Play license testers before release.
 Email/password recovery is implemented through the static landing page. Configure
 the SMTP settings in `.env` (`SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM_EMAIL`, and
 provider credentials where required) before launch. Reset links expire after

@@ -2,6 +2,9 @@ from functools import lru_cache
 from typing import List
 
 from cryptography.fernet import Fernet
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -80,6 +83,13 @@ class Settings(BaseSettings):
     razorpay_topup_amount_paise: int = 0
     razorpay_topup_credits: int = 0
 
+    google_play_billing_enabled: bool = False
+    google_play_package_name: str = "com.lifeos.app"
+    google_play_topup_product_id: str = ""
+    google_play_topup_credits: int = 20
+    google_play_service_account_email: str = ""
+    google_play_service_account_private_key: str = ""
+
     expo_access_token: str = ""
 
     reminder_poll_seconds: int = 30
@@ -140,10 +150,37 @@ class Settings(BaseSettings):
             problems.append(
                 "SUPABASE_SERVICE_ROLE_KEY is required when Supabase authentication is enabled"
             )
-        if self.billing_enabled and not self.razorpay_billing_ready:
+        if self.billing_enabled and not self.razorpay_checkout_ready:
             problems.append(
-                "Razorpay credentials, plan, prices, and credit quantities are required when billing is enabled"
+                "Razorpay credentials and valid top-up prices are required when billing is enabled"
             )
+        if self.razorpay_monthly_plan_id and not self.razorpay_billing_ready:
+            problems.append(
+                "Complete Razorpay subscription and webhook configuration is required when a monthly plan is configured"
+            )
+        if self.google_play_billing_enabled:
+            if not self.google_play_billing_ready:
+                problems.append(
+                    "Google Play billing requires a package name, product ID, positive credit amount, "
+                    "and service-account credentials"
+                )
+            else:
+                try:
+                    private_key = serialization.load_pem_private_key(
+                        self.google_play_service_account_private_key.replace(
+                            "\\n", "\n"
+                        ).encode(),
+                        password=None,
+                    )
+                except (TypeError, ValueError, UnsupportedAlgorithm):
+                    problems.append(
+                        "GOOGLE_PLAY_SERVICE_ACCOUNT_PRIVATE_KEY must be a valid PEM private key"
+                    )
+                else:
+                    if not isinstance(private_key, RSAPrivateKey):
+                        problems.append(
+                            "GOOGLE_PLAY_SERVICE_ACCOUNT_PRIVATE_KEY must be an RSA key"
+                        )
 
         if problems:
             raise ValueError("Unsafe production configuration: " + "; ".join(problems))
@@ -162,6 +199,26 @@ class Settings(BaseSettings):
                 self.razorpay_topup_credits > 0,
                 self.subscription_total_cycles > 0,
             )
+        )
+
+    @property
+    def razorpay_checkout_ready(self) -> bool:
+        return bool(
+            self.razorpay_key_id
+            and self.razorpay_key_secret
+            and self.razorpay_topup_amount_paise >= 100
+            and self.razorpay_topup_credits > 0
+        )
+
+    @property
+    def google_play_billing_ready(self) -> bool:
+        return bool(
+            self.google_play_billing_enabled
+            and self.google_play_package_name
+            and self.google_play_topup_product_id
+            and self.google_play_topup_credits > 0
+            and self.google_play_service_account_email
+            and self.google_play_service_account_private_key
         )
 
     @property

@@ -1,5 +1,7 @@
 import pytest
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from app.config import Settings
 from app.main import create_app
@@ -31,19 +33,102 @@ def test_production_configuration_accepts_explicit_secure_values():
     settings.validate_production()
 
 
-def test_production_billing_requires_complete_razorpay_configuration():
+def test_production_billing_requires_topup_configuration():
     settings = Settings(
         app_env="production",
         debug=False,
         jwt_secret="a-secure-random-secret-with-at-least-32-characters",
         fernet_key=Fernet.generate_key().decode(),
         cors_origins=["https://brainlesshuman.com"],
-        database_url="******db.example.com/lifeos",
+        database_url="postgresql+asyncpg://db.example.com/lifeos",
+        supabase_url="",
         billing_enabled=True,
+        razorpay_key_id="",
+        razorpay_key_secret="",
+        razorpay_topup_amount_paise=0,
+        razorpay_topup_credits=0,
     )
 
     with pytest.raises(ValueError, match="Razorpay credentials"):
         settings.validate_production()
+
+
+def test_production_topup_billing_does_not_require_subscription_setup():
+    settings = Settings(
+        app_env="production",
+        debug=False,
+        jwt_secret="a-secure-random-secret-with-at-least-32-characters",
+        fernet_key=Fernet.generate_key().decode(),
+        cors_origins=["https://brainlesshuman.com"],
+        database_url="postgresql+asyncpg://db.example.com/lifeos",
+        supabase_url="",
+        billing_enabled=True,
+        razorpay_key_id="rzp_test_id",
+        razorpay_key_secret="test_secret",
+        razorpay_topup_amount_paise=9900,
+        razorpay_topup_credits=20,
+    )
+
+    settings.validate_production()
+
+
+def test_production_google_play_billing_requires_service_account_configuration():
+    settings = Settings(
+        app_env="production",
+        debug=False,
+        jwt_secret="a-secure-random-secret-with-at-least-32-characters",
+        fernet_key=Fernet.generate_key().decode(),
+        cors_origins=["https://brainlesshuman.com"],
+        database_url="postgresql+asyncpg://db.example.com/lifeos",
+        supabase_url="",
+        google_play_billing_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="Google Play billing requires"):
+        settings.validate_production()
+
+
+def test_production_google_play_billing_requires_valid_rsa_key():
+    settings = Settings(
+        app_env="production",
+        debug=False,
+        jwt_secret="a-secure-random-secret-with-at-least-32-characters",
+        fernet_key=Fernet.generate_key().decode(),
+        cors_origins=["https://brainlesshuman.com"],
+        database_url="postgresql+asyncpg://db.example.com/lifeos",
+        supabase_url="",
+        google_play_billing_enabled=True,
+        google_play_topup_product_id="lifeos_credit_topup_20",
+        google_play_service_account_email="lifeos@example.iam.gserviceaccount.com",
+        google_play_service_account_private_key="not-a-private-key",
+    )
+
+    with pytest.raises(ValueError, match="valid PEM private key"):
+        settings.validate_production()
+
+
+def test_production_google_play_billing_accepts_complete_rsa_configuration():
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    encoded_private_key = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    settings = Settings(
+        app_env="production",
+        debug=False,
+        jwt_secret="a-secure-random-secret-with-at-least-32-characters",
+        fernet_key=Fernet.generate_key().decode(),
+        cors_origins=["https://brainlesshuman.com"],
+        database_url="postgresql+asyncpg://db.example.com/lifeos",
+        supabase_url="",
+        google_play_billing_enabled=True,
+        google_play_topup_product_id="lifeos_credit_topup_20",
+        google_play_service_account_email="lifeos@example.iam.gserviceaccount.com",
+        google_play_service_account_private_key=encoded_private_key,
+    )
+
+    settings.validate_production()
 
 
 @pytest.mark.parametrize(

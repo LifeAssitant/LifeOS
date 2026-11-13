@@ -27,7 +27,7 @@ services:
       APP_ENV: production
       DEBUG: "false"
     ports:
-      - "127.0.0.1:${API_PORT:-8000}:8000"
+      - "127.0.0.1:${API_PORT:-8001}:8000"
     restart: unless-stopped
     healthcheck:
       test:
@@ -44,6 +44,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
     env_file:
       - .env
     environment:

@@ -273,6 +273,21 @@ class ProcessedRazorpayEvent(Base):
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
 
 
+class ProcessedGooglePlayPurchase(Base):
+    __tablename__ = "processed_google_play_purchases"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    product_id: Mapped[str] = mapped_column(String(150), nullable=False)
+    order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    credits_added: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class PasswordResetToken(Base):
     __tablename__ = "password_reset_tokens"
 
